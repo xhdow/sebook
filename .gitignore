@@ -1,0 +1,15 @@
+# build output
+out/
+dist/
+
+# vault data: never commit encrypted notebooks or plaintext exports
+*.vault
+.vault-*.tmp
+export-*.json
+
+# editor / OS noise
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
