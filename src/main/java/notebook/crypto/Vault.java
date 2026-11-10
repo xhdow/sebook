@@ -70,13 +70,6 @@ import org.bouncycastle.crypto.params.Argon2Parameters;
  */
 public final class Vault {
 
-    /**
-     * Legacy signature used by files written before the header was randomised.
-     * New files never contain it; it is kept only so old vaults can be detected
-     * and rejected with a clear message.
-     */
-    @Deprecated
-    public static final byte[] LEGACY_MAGIC = {'N', 'B', 'T', '1'};
     public static final int VERSION = 1;
 
     /** Maximum number of random padding bytes placed at the start of a file. */
@@ -241,25 +234,10 @@ public final class Vault {
      * Weak structural check: could {@code data} plausibly be a vault file?
      *
      * <p>Since the format has no magic signature, this only verifies the minimum
-     * length and that the data does not start with the deprecated {@code NBT1}
-     * signature. It is not a substitute for {@link #decrypt}.</p>
+     * length. It is not a substitute for {@link #decrypt}.</p>
      */
     public static boolean isVaultFile(byte[] data) {
-        return data != null
-                && data.length >= BASE_HEADER_LEN + NONCE_LEN
-                && !startsWith(data, LEGACY_MAGIC);
-    }
-
-    private static boolean startsWith(byte[] data, byte[] prefix) {
-        if (data.length < prefix.length) {
-            return false;
-        }
-        for (int i = 0; i < prefix.length; i++) {
-            if (data[i] != prefix[i]) {
-                return false;
-            }
-        }
-        return true;
+        return data != null && data.length >= BASE_HEADER_LEN + NONCE_LEN;
     }
 
     /**
@@ -376,10 +354,6 @@ public final class Vault {
     private static Header parseHeader(byte[] data) throws VaultException {
         if (data.length < BASE_HEADER_LEN + NONCE_LEN) {
             throw new VaultException("not a vault file (too short)");
-        }
-        if (startsWith(data, LEGACY_MAGIC)) {
-            throw new VaultException("legacy vault format (NBT1) is not supported; "
-                    + "re-encrypt it with an older build first");
         }
         int p = 0;
         int padLen = data[p++] & 0xff;

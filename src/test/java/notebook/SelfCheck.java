@@ -75,7 +75,6 @@ public final class SelfCheck {
         // small params for speed in this check
         byte[] enc = Vault.encrypt(plain, pwd, 8192, 1, 1);
         check("ciphertext differs from plaintext", !Arrays.equals(enc, plain));
-        check("no legacy magic at the start", !startsWith(enc, "NBT1"));
         check("file is plausible vault", Vault.isVaultFile(enc));
         byte[] dec = Vault.decrypt(enc, pwd);
         check("round trip", Arrays.equals(plain, dec));
@@ -108,16 +107,6 @@ public final class SelfCheck {
             }
         }
         check("first byte is not constant", !sameFirstByte);
-    }
-
-    private static boolean startsWith(byte[] data, String prefix) {
-        byte[] p = prefix.getBytes(StandardCharsets.US_ASCII);
-        for (int i = 0; i < p.length; i++) {
-            if (data[i] != p[i]) {
-                return false;
-            }
-        }
-        return true;
     }
 
     /** Offset of the Argon2 memory-cost field for a given file. */

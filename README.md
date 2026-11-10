@@ -115,8 +115,6 @@ any other value is a **leaf value**. There is no separate `children` field.
   iterations) so a crafted header cannot exhaust memory.
 - A wrong password and a tampered file are indistinguishable: both fail the GCM
   tag check.
-- Files written by older builds (starting with `NBT1`) are rejected with an
-  explicit "legacy vault format" message.
 - No plaintext temporary files are created. `.save` writes through a sibling
   temp file containing only ciphertext, then renames atomically.
 - Key and plaintext buffers are zeroed after use; passwords are read with
