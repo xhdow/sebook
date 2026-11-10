@@ -106,10 +106,17 @@ any other value is a **leaf value**. There is no separate `children` field.
   `Vault.encrypt(..., memoryKib, iterations, parallelism)`).
 - **Cipher:** AES-256-GCM. The whole header (including salt and KDF parameters)
   is authenticated as associated data, so parameters cannot be downgraded.
+- **No file signature.** The format has no magic bytes. Every file starts with a
+  one-byte padding length followed by 0–255 random bytes, so files have no fixed
+  prefix or fixed size and cannot be fingerprinted by their first bytes. The
+  remaining header fields are random (salt, nonce) or high-entropy values, and
+  the whole file reads as a uniform random stream.
 - When reading a file, KDF parameters are range-checked (8 MiB–1 GiB, ≤ 1000
   iterations) so a crafted header cannot exhaust memory.
 - A wrong password and a tampered file are indistinguishable: both fail the GCM
   tag check.
+- Files written by older builds (starting with `NBT1`) are rejected with an
+  explicit "legacy vault format" message.
 - No plaintext temporary files are created. `.save` writes through a sibling
   temp file containing only ciphertext, then renames atomically.
 - Key and plaintext buffers are zeroed after use; passwords are read with

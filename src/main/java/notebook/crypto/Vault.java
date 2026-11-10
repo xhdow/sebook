@@ -34,8 +34,9 @@ import org.bouncycastle.crypto.params.Argon2Parameters;
  *
  * <h2>File layout (big endian)</h2>
  * <pre>
- *   magic      4 bytes  "NBT1"
- *   version    1 byte   (currently 1)
+ *   padLen     1 byte   0..{@value #MAX_PAD_LEN}; number of random padding bytes
+ *   padBytes   padLen    random noise, contents ignored
+ *   version    1 byte   (currently 1); also acts as the format discriminator
  *   kdf        1 byte   (0x13 = Argon2id, 0x00 = legacy Argon2i, 0x01 = Argon2d)
  *   memKiB     4 byte   Argon2 memory cost in KiB
  *   iterations 4 byte   Argon2 time cost
@@ -47,8 +48,16 @@ import org.bouncycastle.crypto.params.Argon2Parameters;
  *   ciphertext rest      AES-GCM output, includes the 16 byte auth tag
  * </pre>
  *
- * <p>Everything above the ciphertext (that is, the whole header) is fed to
- * AES-GCM as associated data.</p>
+ * <p>There is deliberately no magic signature: the file starts with random
+ * noise of a random length, so no fixed signature or fixed-size prefix can be
+ * used to identify the file or fingerprint its format. The header fields are
+ * themselves random or high-entropy values. Everything above the ciphertext
+ * (that is, the whole header) is fed to AES-GCM as associated data, so the
+ * header cannot be modified or downgraded.</p>
+ *
+ * <p>The padding length is not authenticated by the tag in a meaningful way:
+ * modifying it only makes decryption fail, which is indistinguishable from a
+ * wrong password.</p>
  *
  * <h2>Memory hygiene</h2>
  * <p>This class never writes plaintext to disk. Intermediate key and plaintext
@@ -61,9 +70,17 @@ import org.bouncycastle.crypto.params.Argon2Parameters;
  */
 public final class Vault {
 
-    /** File magic: "Notebook Tree" v1. */
-    public static final byte[] MAGIC = {'N', 'B', 'T', '1'};
+    /**
+     * Legacy signature used by files written before the header was randomised.
+     * New files never contain it; it is kept only so old vaults can be detected
+     * and rejected with a clear message.
+     */
+    @Deprecated
+    public static final byte[] LEGACY_MAGIC = {'N', 'B', 'T', '1'};
     public static final int VERSION = 1;
+
+    /** Maximum number of random padding bytes placed at the start of a file. */
+    public static final int MAX_PAD_LEN = 255;
 
     public static final int KDF_ARGON2D = 0x01;
     public static final int KDF_ARGON2I = 0x00;
@@ -149,13 +166,15 @@ public final class Vault {
         }
         byte[] salt = randomBytes(SALT_LEN);
         byte[] nonce = randomBytes(NONCE_LEN);
-        byte[] header = buildHeader(salt, nonce, memoryKib, iterations, parallelism);
+        byte[] padding = randomBytes(RANDOM.nextInt(MAX_PAD_LEN + 1));
+        byte[] header = buildHeader(padding, salt, nonce, memoryKib, iterations, parallelism);
 
         byte[] key = deriveKey(password, salt, memoryKib, iterations, parallelism);
         try {
             byte[] ciphertext = crypt(true, key, nonce, header, plaintext);
             return concat(header, ciphertext);
         } finally {
+            Arrays.fill(padding, (byte) 0);
             wipe(key);
         }
     }
@@ -218,13 +237,25 @@ public final class Vault {
         }
     }
 
-    /** Quick check: does the given data start with a vault signature? */
+    /**
+     * Weak structural check: could {@code data} plausibly be a vault file?
+     *
+     * <p>Since the format has no magic signature, this only verifies the minimum
+     * length and that the data does not start with the deprecated {@code NBT1}
+     * signature. It is not a substitute for {@link #decrypt}.</p>
+     */
     public static boolean isVaultFile(byte[] data) {
-        if (data == null || data.length < MAGIC.length) {
+        return data != null
+                && data.length >= BASE_HEADER_LEN + NONCE_LEN
+                && !startsWith(data, LEGACY_MAGIC);
+    }
+
+    private static boolean startsWith(byte[] data, byte[] prefix) {
+        if (data.length < prefix.length) {
             return false;
         }
-        for (int i = 0; i < MAGIC.length; i++) {
-            if (data[i] != MAGIC[i]) {
+        for (int i = 0; i < prefix.length; i++) {
+            if (data[i] != prefix[i]) {
                 return false;
             }
         }
@@ -300,7 +331,7 @@ public final class Vault {
         }
     }
 
-    private static byte[] buildHeader(byte[] salt, byte[] nonce,
+    private static byte[] buildHeader(byte[] padding, byte[] salt, byte[] nonce,
                                       int memoryKib, int iterations, int parallelism) {
         if (memoryKib < MIN_MEMORY_KIB) {
             throw new IllegalArgumentException("memoryKib must be >= " + MIN_MEMORY_KIB);
@@ -311,10 +342,14 @@ public final class Vault {
         if (parallelism < 1 || parallelism > 255) {
             throw new IllegalArgumentException("parallelism out of range");
         }
+        if (padding.length > MAX_PAD_LEN) {
+            throw new IllegalArgumentException("padding too long");
+        }
         try {
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
             DataOutputStream out = new DataOutputStream(bos);
-            out.write(MAGIC);
+            out.writeByte(padding.length);
+            out.write(padding);
             out.writeByte(VERSION);
             out.writeByte(KDF_ARGON2ID);
             out.writeInt(memoryKib);
@@ -331,15 +366,27 @@ public final class Vault {
         }
     }
 
+    /**
+     * Fixed cost of the header without padding: padLen(1) + version(1) + kdf(1)
+     * + mem(4) + iter(4) + par(1) + keyLen(1) + saltLen(1) + salt + nonce.
+     */
+    private static final int BASE_HEADER_LEN =
+            1 + 1 + 1 + 4 + 4 + 1 + 1 + 1 + SALT_LEN + NONCE_LEN;
+
     private static Header parseHeader(byte[] data) throws VaultException {
-        int minHeader = MAGIC.length + 1 + 1 + 4 + 4 + 1 + 1 + 1 + SALT_LEN + NONCE_LEN;
-        if (data.length < minHeader) {
+        if (data.length < BASE_HEADER_LEN + NONCE_LEN) {
             throw new VaultException("not a vault file (too short)");
         }
-        if (!isVaultFile(data)) {
-            throw new VaultException("not a vault file (bad magic)");
+        if (startsWith(data, LEGACY_MAGIC)) {
+            throw new VaultException("legacy vault format (NBT1) is not supported; "
+                    + "re-encrypt it with an older build first");
         }
-        int p = MAGIC.length;
+        int p = 0;
+        int padLen = data[p++] & 0xff;
+        if (data.length < p + padLen + BASE_HEADER_LEN) {
+            throw new VaultException("corrupt vault header");
+        }
+        p += padLen;
         int version = data[p++] & 0xff;
         if (version != VERSION) {
             throw new VaultException("unsupported vault version: " + version);

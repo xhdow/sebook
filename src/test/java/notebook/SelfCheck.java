@@ -75,11 +75,55 @@ public final class SelfCheck {
         // small params for speed in this check
         byte[] enc = Vault.encrypt(plain, pwd, 8192, 1, 1);
         check("ciphertext differs from plaintext", !Arrays.equals(enc, plain));
-        check("magic detected", Vault.isVaultFile(enc));
+        check("no legacy magic at the start", !startsWith(enc, "NBT1"));
+        check("file is plausible vault", Vault.isVaultFile(enc));
         byte[] dec = Vault.decrypt(enc, pwd);
         check("round trip", Arrays.equals(plain, dec));
         byte[] enc2 = Vault.encrypt(plain, pwd, 8192, 1, 1);
         check("salt/nonce randomise output", !Arrays.equals(enc, enc2));
+
+        // padding makes the file length vary
+        boolean sawVariation = false;
+        int baseline = -1;
+        for (int i = 0; i < 40; i++) {
+            byte[] probe = Vault.encrypt(plain, pwd, 8192, 1, 1);
+            if (baseline == -1) {
+                baseline = probe.length;
+            } else if (probe.length != baseline) {
+                sawVariation = true;
+                break;
+            }
+        }
+        check("padding varies file length", sawVariation);
+
+        // padding bytes are noise, not a fixed prefix
+        byte[][] samples = new byte[8][];
+        for (int i = 0; i < samples.length; i++) {
+            samples[i] = Vault.encrypt(plain, pwd, 8192, 1, 1);
+        }
+        boolean sameFirstByte = true;
+        for (byte[] s : samples) {
+            if (s[0] != samples[0][0]) {
+                sameFirstByte = false;
+            }
+        }
+        check("first byte is not constant", !sameFirstByte);
+    }
+
+    private static boolean startsWith(byte[] data, String prefix) {
+        byte[] p = prefix.getBytes(StandardCharsets.US_ASCII);
+        for (int i = 0; i < p.length; i++) {
+            if (data[i] != p[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Offset of the Argon2 memory-cost field for a given file. */
+    private static int memoryFieldOffset(byte[] file) {
+        int padLen = file[0] & 0xff;
+        return 1 + padLen + 1 + 1; // padLen byte + padding + version + kdf
     }
 
     private static void cryptoWrongPassword() throws Exception {
@@ -96,18 +140,27 @@ public final class SelfCheck {
         mod[mod.length - 1] ^= 0x01;
         checkThrows("tampered ciphertext rejected", VaultException.class,
                 () -> Vault.decrypt(mod, pwd));
+
+        int saltOff = memoryFieldOffset(enc) + 4 + 4 + 1 + 1 + 1; // mem, iter, par, keyLen, saltLen
         byte[] mod2 = enc.clone();
-        mod2[27] ^= 0x01; // inside the salt, part of the AAD
+        mod2[saltOff] ^= 0x01; // inside the salt, part of the AAD
         checkThrows("tampered header rejected", VaultException.class,
                 () -> Vault.decrypt(mod2, pwd));
+
         byte[] mod3 = enc.clone();
-        // memory cost bytes (offset 6..9) set absurdly high
-        mod3[6] = (byte) 0x7F;
-        mod3[7] = (byte) 0xFF;
-        mod3[8] = (byte) 0xFF;
-        mod3[9] = (byte) 0xFF;
+        int memOff = memoryFieldOffset(enc);
+        // memory cost bytes set absurdly high
+        mod3[memOff] = (byte) 0x7F;
+        mod3[memOff + 1] = (byte) 0xFF;
+        mod3[memOff + 2] = (byte) 0xFF;
+        mod3[memOff + 3] = (byte) 0xFF;
         checkThrows("absurd KDF params rejected", VaultException.class,
                 () -> Vault.decrypt(mod3, pwd));
+
+        byte[] mod4 = enc.clone();
+        mod4[0] = (byte) 0xFE; // bogus padLen, points past the real header
+        checkThrows("tampered pad length rejected", VaultException.class,
+                () -> Vault.decrypt(mod4, pwd));
     }
 
     // ---------------- tree ----------------
