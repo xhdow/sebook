@@ -82,8 +82,7 @@ dist\filetool.cmd encrypt photo.jpg                 # -> photo.jpg.enc
 dist\filetool.cmd encrypt data.bin out.vault        # explicit output
 dist\filetool.cmd decrypt photo.jpg.enc             # -> photo.jpg
 dist\filetool.cmd decrypt data.bin.enc restored.bin
-dist\filetool.cmd info photo.jpg.enc                # header metadata
-dist\filetool.cmd info photo.jpg.enc --verbose      # also salt and nonce hex
+dist\filetool.cmd info photo.jpg.enc                # header metadata + salt/nonce hex
 ```
 
 - Output defaults to `<input>.enc` when encrypting; when decrypting, `.enc` is
@@ -92,9 +91,8 @@ dist\filetool.cmd info photo.jpg.enc --verbose      # also salt and nonce hex
 - Passwords are always read interactively, never from the command line, so they
   do not end up in the process list or shell history.
 - `info` needs no password and does not decrypt anything. It reports the format
-  version, KDF, KDF parameters, key/salt/nonce lengths, padding length, payload
-  size and total overhead. `--verbose` additionally prints the salt and nonce as
-  hex.
+  version, KDF, KDF parameters, key/salt/nonce lengths, the salt and nonce in
+  hex, padding length, payload size and total overhead.
 - Files are read fully into memory and written atomically, so very large files
   need correspondingly large heap (`java -Xmx...`).
 

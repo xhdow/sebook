@@ -21,12 +21,12 @@ import notebook.crypto.VaultException;
  * <pre>
  *   java -cp ... notebook.cli.FileToolCli encrypt &lt;in&gt; [&lt;out&gt;] [--force]
  *   java -cp ... notebook.cli.FileToolCli decrypt &lt;in&gt; [&lt;out&gt;] [--force]
- *   java -cp ... notebook.cli.FileToolCli info    &lt;file&gt; [--verbose]
+ *   java -cp ... notebook.cli.FileToolCli info    &lt;file&gt;
  * </pre>
  *
  * <p>{@code info} never asks for a password and never decrypts anything: it
- * only reports the structural header fields. {@code --verbose} additionally
- * prints the raw salt and nonce bytes.</p>
+ * only reports the structural header fields, including the salt and nonce as
+ * hex.</p>
  *
  * <p>Passwords are read interactively (twice for encryption). They are never
  * accepted as command-line arguments, which would leak them into the process
@@ -87,8 +87,9 @@ public final class FileToolCli {
                 usage:
                   FileToolCli encrypt <input> [output] [--force]   encrypt any file
                   FileToolCli decrypt <input> [output] [--force]   decrypt a vault file
-                  FileToolCli info <file> [--verbose]              show header metadata
-                                                                    (no password needed)
+                  FileToolCli info <file>                          show header metadata,
+                                                                     including salt/nonce hex
+                                                                     (no password needed)
 
                 defaults:
                   encrypt output = <input>.enc
@@ -216,16 +217,13 @@ public final class FileToolCli {
             out.println("kdf parallelism: " + h.parallelism());
             out.println("key length     : " + h.keyLen() + " bytes");
             out.println("padding length : " + h.padLen() + " bytes");
+            HexFormat hex = HexFormat.of();
             out.println("salt length    : " + h.saltLen() + " bytes");
+            out.println("salt (hex)     : " + hex.formatHex(h.salt()));
             out.println("nonce length   : " + h.nonceLen() + " bytes");
+            out.println("nonce (hex)    : " + hex.formatHex(h.nonce()));
             out.println("ciphertext+tag : " + h.ciphertextLen() + " bytes");
             out.println("overhead       : " + (h.totalLen() - h.ciphertextLen()) + " bytes");
-
-            if (o.verbose) {
-                HexFormat hex = HexFormat.of();
-                out.println("salt (hex)     : " + hex.formatHex(h.salt()));
-                out.println("nonce (hex)    : " + hex.formatHex(h.nonce()));
-            }
             return 0;
         } finally {
             Vault.wipe(data);
@@ -279,15 +277,14 @@ public final class FileToolCli {
         String input;
         String output;
         boolean force;
-        boolean verbose;
 
         static Options parse(String[] args) {
             Options o = new Options();
             for (String a : args) {
                 if (a.equals("--force") || a.equals("-f")) {
                     o.force = true;
-                } else if (a.equals("--verbose") || a.equals("-v")) {
-                    o.verbose = true;
+                } else if (a.startsWith("-")) {
+                    // unknown option: ignore rather than mistake it for a path
                 } else if (o.input == null) {
                     o.input = a;
                 } else if (o.output == null) {
