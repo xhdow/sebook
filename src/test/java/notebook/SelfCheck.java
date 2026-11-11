@@ -31,6 +31,7 @@ public final class SelfCheck {
         treeJsonRoundTrip();
         treeReservedKey();
         passwordGenerator();
+        vaultInspect();
         System.out.println();
         System.out.println("passed=" + passed + " failed=" + failed);
         if (failed > 0) {
@@ -279,5 +280,28 @@ public final class SelfCheck {
             }
         }
         check("passwords are not constant", distinct);
+    }
+
+    private static void vaultInspect() throws Exception {
+        char[] pwd = "inspect-pw".toCharArray();
+        byte[] plain = "0123456789abcdef".getBytes(StandardCharsets.UTF_8);
+        byte[] enc = Vault.encrypt(plain, pwd, 8192, 2, 1);
+        Vault.HeaderInfo h = Vault.inspect(enc);
+        check("inspect version", h.version() == 1);
+        check("inspect kdf name", h.kdfName().equals("Argon2id"), h.kdfName());
+        check("inspect memory", h.memoryKib() == 8192);
+        check("inspect iterations", h.iterations() == 2);
+        check("inspect key length", h.keyLen() == 32);
+        check("inspect salt length", h.saltLen() == 16);
+        check("inspect nonce length", h.nonceLen() == 12);
+        check("inspect pad length in range", h.padLen() >= 0 && h.padLen() <= Vault.MAX_PAD_LEN);
+        check("inspect salt matches file",
+                Arrays.equals(h.salt(), Arrays.copyOfRange(enc, 1 + h.padLen() + 13, 1 + h.padLen() + 29)));
+        long expectedCt = enc.length - (1L + h.padLen() + 1 + 1 + 4 + 4 + 1 + 1 + 1 + 16 + 12);
+        check("inspect ciphertext length", h.ciphertextLen() == expectedCt,
+                h.ciphertextLen() + " vs " + expectedCt);
+        check("inspect total length", h.totalLen() == enc.length);
+        checkThrows("inspect rejects short data", VaultException.class,
+                () -> Vault.inspect(new byte[10]));
     }
 }

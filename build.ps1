@@ -44,6 +44,13 @@ $manifestPath = Join-Path $root 'out\MANIFEST.MF'
 if ($LASTEXITCODE -ne 0) { throw "jar packaging failed" }
 Copy-Item -Recurse -Force lib dist\lib
 
+Write-Host "writing dist\filetool.cmd..."
+$filetool = @"
+@echo off
+java -Dfile.encoding=UTF-8 -cp "%~dp0notebook.jar;%~dp0lib\*" notebook.cli.FileToolCli %*
+"@
+[System.IO.File]::WriteAllText((Join-Path $root 'dist\filetool.cmd'), ($filetool -replace "`r?`n", "`r`n"))
+
 if ($Test) {
     Write-Host "compiling and running self-check..."
     $testCp = ($libCp + ';' + (Resolve-Path out).Path)
@@ -57,3 +64,4 @@ if ($Test) {
 Write-Host ""
 Write-Host "done. run with:"
 Write-Host "  java -jar dist\notebook.jar [vault-file]"
+Write-Host "  dist\filetool.cmd encrypt|decrypt|info ..."

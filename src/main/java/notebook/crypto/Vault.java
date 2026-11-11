@@ -172,6 +172,60 @@ public final class Vault {
         }
     }
 
+    /**
+     * Describes the cleartext metadata stored in a vault file. Returned by
+     * {@link #inspect(byte[])} without requiring the password; useful for
+     * diagnostics, but note that these values are visible to anyone holding
+     * the file.
+     */
+    public record HeaderInfo(int version, int kdf, int memoryKib, int iterations,
+                             int parallelism, int keyLen, int padLen, int saltLen,
+                             int nonceLen, long ciphertextLen, long totalLen,
+                             byte[] salt, byte[] nonce) {
+
+        public HeaderInfo {
+            salt = salt.clone();
+            nonce = nonce.clone();
+        }
+
+        @Override
+        public byte[] salt() {
+            return salt.clone();
+        }
+
+        @Override
+        public byte[] nonce() {
+            return nonce.clone();
+        }
+
+        /** Human readable KDF name. */
+        public String kdfName() {
+            return switch (kdf) {
+                case KDF_ARGON2ID -> "Argon2id";
+                case KDF_ARGON2I -> "Argon2i";
+                case KDF_ARGON2D -> "Argon2d";
+                default -> "unknown(0x" + Integer.toHexString(kdf) + ")";
+            };
+        }
+    }
+
+    /**
+     * Reads the cleartext header of a vault file without decrypting it.
+     *
+     * <p>This only works on the structural fields; it does not prove the
+     * password is correct.</p>
+     */
+    public static HeaderInfo inspect(byte[] fileBytes) throws VaultException {
+        if (fileBytes == null || fileBytes.length == 0) {
+            throw new VaultException("vault data is empty");
+        }
+        Header h = parseHeader(fileBytes);
+        return new HeaderInfo(VERSION, h.kdf, h.memoryKib, h.iterations, h.parallelism,
+                h.keyLen, h.padLen, h.salt.length, h.nonce.length,
+                fileBytes.length - (long) h.headerLength, fileBytes.length,
+                h.salt(), h.nonce());
+    }
+
     /** Decrypts vault file bytes with default-compatible header parameters. */
     public static byte[] decrypt(byte[] fileBytes, char[] password) throws VaultException {
         if (fileBytes == null || fileBytes.length == 0) {
@@ -290,8 +344,8 @@ public final class Vault {
     // Internals
     // ---------------------------------------------------------------------
 
-    private record Header(int kdf, int memoryKib, int iterations, int parallelism,
-                          int keyLen, byte[] salt, byte[] nonce, int headerLength) {
+    private record Header(int kdf, int memoryKib, int iterations, int parallelism, int keyLen,
+                          int padLen, byte[] salt, byte[] nonce, int headerLength) {
 
         Header {
             salt = salt.clone();
@@ -386,7 +440,7 @@ public final class Vault {
         if (data.length <= p) {
             throw new VaultException("vault contains no ciphertext");
         }
-        return new Header(kdf, memoryKib, iterations, parallelism, keyLen, salt, nonce, p);
+        return new Header(kdf, memoryKib, iterations, parallelism, keyLen, padLen, salt, nonce, p);
     }
 
     private static byte[] crypt(boolean encrypt, byte[] key, byte[] nonce, byte[] aad, byte[] input)

@@ -11,6 +11,7 @@ src/main/java/notebook/
   crypto/   Vault      AES-256-GCM + Argon2id, standalone library
   tree/     NodeTree   in-memory JSON node tree, standalone library
   cli/      NotebookCli  interactive shell
+            FileToolCli  encrypt/decrypt any file, inspect header
 src/test/java/notebook/
   SelfCheck.java       dependency-free test suite
 ```
@@ -71,6 +72,31 @@ Values with spaces must be quoted: `.set title "my long title"`.
 Fuzzy names use edit distance. `wrk` resolves to `work` when it is the only
 close match; when several children match, the candidates are listed and you
 must give an exact name.
+
+## Encrypting arbitrary files
+
+`dist\filetool.cmd` encrypts and decrypts any file, not just notebooks:
+
+```powershell
+dist\filetool.cmd encrypt photo.jpg                 # -> photo.jpg.enc
+dist\filetool.cmd encrypt data.bin out.vault        # explicit output
+dist\filetool.cmd decrypt photo.jpg.enc             # -> photo.jpg
+dist\filetool.cmd decrypt data.bin.enc restored.bin
+dist\filetool.cmd info photo.jpg.enc                # header metadata
+dist\filetool.cmd info photo.jpg.enc --verbose      # also salt and nonce hex
+```
+
+- Output defaults to `<input>.enc` when encrypting; when decrypting, `.enc` is
+  stripped, otherwise `.dec` is appended.
+- Existing files are never overwritten unless `--force` is given.
+- Passwords are always read interactively, never from the command line, so they
+  do not end up in the process list or shell history.
+- `info` needs no password and does not decrypt anything. It reports the format
+  version, KDF, KDF parameters, key/salt/nonce lengths, padding length, payload
+  size and total overhead. `--verbose` additionally prints the salt and nonce as
+  hex.
+- Files are read fully into memory and written atomically, so very large files
+  need correspondingly large heap (`java -Xmx...`).
 
 ## Data model
 
