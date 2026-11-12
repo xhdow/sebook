@@ -23,32 +23,42 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
  * A navigable, versioned JSON node tree.
  *
  * <h2>Model</h2>
- * <p>Every node is a JSON object. A key whose value is an object is a
- * <b>child node</b>; any other value (string, number, boolean, array, null) is
- * a <b>leaf value</b>. There is no separate "children" field: nesting is the
- * structure.</p>
+ * <p>Every entry is a JSON object carrying its own {@value #TS}. Two kinds of
+ * nodes exist, distinguished by the {@value #NT} type marker:</p>
+ * <ul>
+ *   <li><b>Directory</b> ({@code nt} is absent or {@code "d"}): its other keys
+ *       name its children.</li>
+ *   <li><b>Value</b> ({@code nt} is {@code "v"}): its payload lives in
+ *       {@code val}, which may be any JSON value (string, number, boolean,
+ *       array, null).</li>
+ * </ul>
  *
  * <pre>
  * {
  *   "ts": 1731123456789,
- *   "name": "my notes",
+ *   "nt": "d",
+ *   "title": { "ts": 1731123456790, "nt": "v", "val": "my notes" },
  *   "work": {
- *     "ts": 1731123456790,
- *     "title": "project"
+ *     "ts": 1731123456791,
+ *     "nt": "d",
+ *     "owner": { "ts": 1731123456792, "nt": "v", "val": "tom" }
  *   }
  * }
  * </pre>
  *
+ * <p>Because each value carries its own timestamp, two values under the same
+ * parent can be edited independently and still be merged without ambiguity.</p>
+ *
  * <h2>Timestamps</h2>
- * <p>Every object node carries a numeric {@value #TS} field holding the epoch
+ * <p>Every node carries a numeric {@value #TS} field holding the epoch
  * millisecond of its last modification. Modifying anything inside a node
  * updates that node's {@code ts} and propagates upward through every ancestor,
- * including the root. Setting a value that is equal to the current one is a no
+ * including the root. Writing a value equal to the current one is a no
  * operation and does not touch {@code ts}. Read-only navigation never touches
  * {@code ts}.</p>
  *
- * <p>The key {@value #TS} is reserved and cannot be created, renamed or
- * deleted through this API.</p>
+ * <p>The keys {@value #TS}, {@value #NT} and {@value #VAL} are reserved and
+ * cannot be created, renamed or deleted as child names through this API.</p>
  *
  * <h2>Independence</h2>
  * <p>This class is pure in-memory logic: it has no knowledge of files,
@@ -61,6 +71,14 @@ public final class NodeTree {
 
     /** Reserved key holding the last-modification timestamp (epoch millis). */
     public static final String TS = "ts";
+    /** Node type discriminator: {@value #NT_DIR} for directories, {@value #NT_VALUE} for values. */
+    public static final String NT = "nt";
+    /** Value of {@link #NT} marking a value node. */
+    public static final String NT_VALUE = "v";
+    /** Value of {@link #NT} marking a directory node. */
+    public static final String NT_DIR = "d";
+    /** Payload key of a value node. */
+    public static final String VAL = "val";
 
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .enable(SerializationFeature.INDENT_OUTPUT)
@@ -91,8 +109,9 @@ public final class NodeTree {
      * Parses a tree from plain JSON text.
      *
      * @throws NodeTreeException if the JSON is invalid, the top level is not an
-     *                           object, or any nested object lacks a valid
-     *                           {@code ts} field
+     *                           object, any nested node lacks a numeric
+     *                           {@code ts}, or a value node ({@code nt = "v"})
+     *                           lacks its {@code val} payload
      */
     public static NodeTree fromJson(String json) throws NodeTreeException {
         Objects.requireNonNull(json, "json");
@@ -112,9 +131,10 @@ public final class NodeTree {
     }
 
     /**
-     * Walks the tree and makes sure every object node has a numeric {@code ts}.
-     * The root is always stamped with {@code now} when missing (it stands for the
-     * tree itself), nested nodes are rejected when missing for strictness.
+     * Checks the shape of a parsed tree: every node needs a numeric {@code ts},
+     * value nodes need a {@code val} payload, and directories cannot hold any.
+     * The root is always stamped with {@code now} when missing (it stands for
+     * the tree itself), nested nodes are rejected when missing for strictness.
      */
     private static void normalize(ObjectNode node, String path, long now, boolean isRoot) throws NodeTreeException {
         JsonNode ts = node.get(TS);
@@ -125,8 +145,23 @@ public final class NodeTree {
                 throw new NodeTreeException("node " + path + " is missing a numeric '" + TS + "' field");
             }
         }
+        if (isValue(node)) {
+            if (!node.has(VAL)) {
+                throw new NodeTreeException("value node " + path + " is missing its '" + VAL + "' payload");
+            }
+            return;
+        }
+        if (node.has(VAL)) {
+            throw new NodeTreeException("directory " + path + " must not hold a '" + VAL + "' payload"
+                    + " (set '" + NT + "':'" + NT_VALUE + "' to make it a value node)");
+        }
         for (Map.Entry<String, JsonNode> e : node.properties()) {
-            if (e.getValue().isObject()) {
+            if (!isReserved(e.getKey())) {
+                if (!e.getValue().isObject()) {
+                    throw new NodeTreeException("directory " + path + " holds a raw value under '"
+                            + e.getKey() + "'; wrap it as {\"" + TS + "\":..,\"" + NT + "\":\""
+                            + NT_VALUE + "\",\"" + VAL + "\":..}");
+                }
                 normalize((ObjectNode) e.getValue(), path + e.getKey() + "/", now, false);
             }
         }
@@ -150,6 +185,30 @@ public final class NodeTree {
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("serialization failed", e);
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Node kinds
+    // ---------------------------------------------------------------------
+
+    /** True if {@code node} is a value node ({@code nt = "v"}); otherwise it is a directory. */
+    public static boolean isValue(JsonNode node) {
+        return node != null && node.isObject() && NT_VALUE.equals(node.path(NT).asText(null));
+    }
+
+    /** True if {@code node} is a directory ({@code nt} absent or {@code "d"}). */
+    public static boolean isDirectory(JsonNode node) {
+        return node != null && node.isObject() && !isValue(node);
+    }
+
+    /** True for {@value #TS}, {@value #NT} and {@value #VAL}, which are never child names. */
+    static boolean isReserved(String key) {
+        return key.equals(TS) || key.equals(NT) || key.equals(VAL);
+    }
+
+    /** The payload of a value node, or {@code null} when {@code node} is not a value. */
+    public static JsonNode payload(JsonNode node) {
+        return isValue(node) ? node.get(VAL) : null;
     }
 
     // ---------------------------------------------------------------------
@@ -178,15 +237,22 @@ public final class NodeTree {
      *
      * <p>Accepts absolute paths ({@code /a/b}), relative paths ({@code a/b}),
      * {@code .} and {@code ..}. Each segment is resolved with
-     * {@link #match(String)} so fuzzy names work. A segment that resolves to a
-     * leaf value is rejected.</p>
+     * {@link #match(String)} so fuzzy names work. Only directories can be
+     * entered; a segment that resolves to a value node is rejected.</p>
      *
-     * @throws NodeTreeException if the path cannot be resolved
+     * @throws NodeTreeException if the path cannot be resolved or names a value
      * @throws AmbiguousPathException if a segment matches several children
      */
     public void cd(String path) throws NodeTreeException {
         Objects.requireNonNull(path, "path");
         List<String> target = resolve(path);
+        for (int i = 1; i <= target.size(); i++) {
+            ObjectNode n = nodeAt(target.subList(0, i));
+            if (isValue(n)) {
+                throw new NodeTreeException("'" + pathOf(target.subList(0, i))
+                        + "' is a value, not a directory");
+            }
+        }
         cwd.clear();
         cwd.addAll(target);
     }
@@ -233,35 +299,33 @@ public final class NodeTree {
         return stack;
     }
 
-    /** Lists the children (object-valued entries) of the current node, sorted by name. */
+    /** Lists the child directories of the current node, sorted by name. */
     public List<String> ls() {
-        return childrenOf(current());
+        return directoriesOf(current());
     }
 
-    /** Lists the leaf keys (non-object entries except {@code ts}) of the current node. */
+    /** Lists the child values of the current node, sorted by name. */
     public List<String> keys() {
-        return keysOf(current());
+        return valuesOf(current());
     }
 
-    /** Lists every key of the current node (children and leaves), sorted. */
+    /** Lists every child name of the current node (directories and values), sorted. */
     public List<String> allKeys() {
         List<String> all = new ArrayList<>();
-        all.addAll(childrenOf(current()));
-        all.addAll(keysOf(current()));
+        all.addAll(directoriesOf(current()));
+        all.addAll(valuesOf(current()));
         all.sort(String::compareTo);
         return all;
     }
 
-    /** True if the named child of the current node exists. */
+    /** True if the named child directory of the current node exists. */
     public boolean hasChild(String name) {
-        JsonNode n = current().get(name);
-        return n != null && n.isObject();
+        return isDirectory(current().get(name));
     }
 
-    /** True if the current node holds a leaf value under {@code key}. */
+    /** True if the current node holds a value under {@code key}. */
     public boolean hasValue(String key) {
-        JsonNode n = current().get(key);
-        return n != null && !n.isObject() && !key.equals(TS);
+        return isValue(current().get(key));
     }
 
     // ---------------------------------------------------------------------
@@ -269,47 +333,69 @@ public final class NodeTree {
     // ---------------------------------------------------------------------
 
     /**
-     * Reads a leaf value from the current node.
+     * Reads the payload of a value under {@code key} in the current node.
      *
-     * @return the JSON value, or {@code null} for a JSON null / a missing key
+     * @return the payload, or {@code null} when the key is missing or is a
+     *         directory
      */
     public JsonNode get(String key) {
         JsonNode n = current().get(key);
-        return n;
+        return payload(n);
     }
 
     /**
-     * Sets a leaf value on the current node. If the key currently holds a child
-     * node this fails; use {@link #cd(String)} first or delete it.
+     * The whole {@code key} entry of the current node (directory or value node),
+     * with its own {@code ts}. {@code null} when missing. Used for {@code .ll}.
+     */
+    public JsonNode entry(String key) {
+        return current().get(key);
+    }
+
+    /**
+     * Sets the payload of a value under {@code key} on the current node,
+     * creating the value node when needed. If the key currently holds a
+     * directory this fails; use {@link #cd(String)} first or remove it.
      *
-     * @throws NodeTreeException if {@code key} is reserved, blank or already a child
+     * @param value any JSON value, including {@code null} (stored as JSON null)
+     * @throws NodeTreeException if {@code key} is reserved, blank or a directory
      */
     public void set(String key, JsonNode value) throws NodeTreeException {
         checkUserKey(key);
         if (value == null) {
-            throw new NodeTreeException("value must not be null (use clear)");
-        }
-        if (value.isObject()) {
-            throw new NodeTreeException("value is an object; use mkdir to create nodes");
+            value = JsonNodeFactory.instance.nullNode();
         }
         ObjectNode node = current();
         JsonNode existing = node.get(key);
-        if (existing != null && existing.isObject()) {
-            throw new NodeTreeException("'" + key + "' is a child node, not a value");
+        if (isDirectory(existing)) {
+            throw new NodeTreeException("'" + key + "' is a directory, not a value");
         }
-        if (existing != null && existing.equals(value)) {
-            return; // no change, no ts update
+        if (isValue(existing)) {
+            if (Objects.equals(existing.get(VAL), value)) {
+                return; // no change, no ts update
+            }
+            long now = System.currentTimeMillis();
+            ((ObjectNode) existing).set(VAL, value);
+            ((ObjectNode) existing).put(TS, now);
+            touch(now);
+            return;
         }
-        node.set(key, value);
-        touch();
+        if (existing != null) {
+            throw new NodeTreeException("'" + key + "' exists but is neither a directory nor a value");
+        }
+        long now = System.currentTimeMillis();
+        ObjectNode child = JsonNodeFactory.instance.objectNode();
+        child.put(TS, now);
+        child.put(NT, NT_VALUE);
+        child.set(VAL, value);
+        node.set(key, child);
+        touch(now);
     }
 
-    /** Removes a leaf key from the current node. Returns whether it existed. */
+    /** Removes the value under {@code key} from the current node. Returns whether it existed. */
     public boolean clear(String key) throws NodeTreeException {
         checkUserKey(key);
         ObjectNode node = current();
-        JsonNode existing = node.get(key);
-        if (existing == null || existing.isObject()) {
+        if (!isValue(node.get(key))) {
             return false;
         }
         node.remove(key);
@@ -322,7 +408,7 @@ public final class NodeTree {
     // ---------------------------------------------------------------------
 
     /**
-     * Creates an empty child node under the current node, stamped with the
+     * Creates an empty child directory under the current node, stamped with the
      * current time.
      *
      * @throws NodeTreeException if the name is reserved, blank, already used, or
@@ -335,21 +421,22 @@ public final class NodeTree {
         }
         ObjectNode node = current();
         JsonNode existing = node.get(name);
-        if (existing != null) {
-            if (existing.isObject()) {
-                throw new NodeTreeException("child node already exists: " + name);
-            }
+        if (isDirectory(existing)) {
+            throw new NodeTreeException("child node already exists: " + name);
+        }
+        if (isValue(existing)) {
             throw new NodeTreeException("a value named '" + name + "' already exists");
         }
         ObjectNode child = JsonNodeFactory.instance.objectNode();
         child.put(TS, System.currentTimeMillis());
+        child.put(NT, NT_DIR);
         node.set(name, child);
         touch();
     }
 
     /**
-     * Deletes a child node (and everything below it). Returns whether it existed.
-     * Refuses to delete a leaf value; use {@link #clear(String)} for those.
+     * Deletes a child directory (and everything below it). Returns whether it
+     * existed. Refuses to delete a value; use {@link #clear(String)} for those.
      */
     public boolean rmdir(String name) throws NodeTreeException {
         checkUserKey(name);
@@ -358,8 +445,8 @@ public final class NodeTree {
         if (existing == null) {
             return false;
         }
-        if (!existing.isObject()) {
-            throw new NodeTreeException("'" + name + "' is a value, not a node");
+        if (isValue(existing)) {
+            throw new NodeTreeException("'" + name + "' is a value, not a directory");
         }
         node.remove(name);
         if (cwd.size() > 0 && name.equals(cwd.get(cwd.size() - 1))) {
@@ -437,8 +524,12 @@ public final class NodeTree {
     }
 
     private void touch() {
+        touch(System.currentTimeMillis());
+    }
+
+    /** Stamps the current node and every ancestor with {@code now}. */
+    private void touch(long now) {
         dirty = true;
-        long now = System.currentTimeMillis();
         ObjectNode n = root;
         n.put(TS, now);
         for (String segment : cwd) {
@@ -451,8 +542,8 @@ public final class NodeTree {
         if (key == null || key.isBlank()) {
             throw new NodeTreeException("key must not be blank");
         }
-        if (key.equals(TS)) {
-            throw new NodeTreeException("'" + TS + "' is a reserved key");
+        if (isReserved(key)) {
+            throw new NodeTreeException("'" + key + "' is a reserved key");
         }
     }
 
@@ -464,14 +555,11 @@ public final class NodeTree {
      * Three-way merges another tree into this one, starting at the root.
      *
      * <p>Let {@code C} be this tree and {@code S} the imported one. Every node
-     * is aligned by its position (its path from the root). When a value only
-     * one side has is merged, the ancestor links are filled with its owning
-     * object's timestamp, which is the {@code ts} the other side would have
-     * stored had it known the value too.</p>
+     * is aligned by its position (its path from the root).</p>
      *
-     * <h2>Nodes</h2>
+     * <h2>Directories</h2>
      * <ul>
-     *   <li>A path only {@code S} has is added verbatim.</li>
+     *   <li>A path only {@code S} has is added with its whole subtree.</li>
      *   <li>A path only {@code C} has is kept. Merging only ever adds: the two
      *       notebooks may describe different work (say {@code projectA} on one
      *       side and {@code projectB} on the other), so a path missing from
@@ -483,10 +571,16 @@ public final class NodeTree {
      *       union of both sides.</li>
      * </ul>
      *
-     * <h2>Leaves</h2>
-     * <p>A key holding different values on both sides keeps the newer one
-     * ({@code ts(S.owner)} versus {@code ts(C.owner)}; a tie keeps the current
-     * value). Missing on either side counts as old.</p>
+     * <h2>Values</h2>
+     * <p>A value present on both sides with the same payload is kept. With
+     * different payloads the newer value wins, compared by the value's
+     * <b>own</b> {@code ts} (a tie keeps the current one). Because each value
+     * carries its own timestamp, the {@code user} and {@code password} values
+     * under one parent are decided independently: editing {@code user} on one
+     * side and {@code password} on the other merges both edits.</p>
+     *
+     * <p>When the same path is a directory on one side and a value on the
+     * other, the newer node wins as a whole (a tie keeps the current shape).</p>
      *
      * <h2>Timestamps</h2>
      * <p>The merged {@code ts} obeys {@code min(max(S.ts, C.ts), now)}:</p>
@@ -509,7 +603,7 @@ public final class NodeTree {
         Objects.requireNonNull(other, "other");
         long now = System.currentTimeMillis();
         Counter counter = new Counter();
-        MergeOutcome merged = mergeObject(root, other.root, now, counter);
+        MergeOutcome merged = mergeNode(root, other.root, now, counter);
         cwd.clear();
         if (merged.changed()) {
             // mutate in place so references to root handed out earlier stay valid
@@ -537,65 +631,113 @@ public final class NodeTree {
     /**
      * Merges the imported node {@code otherNode} into the current node
      * {@code here}, both representing the same path.
+     *
+     * <p>Directories are merged key by key, never replaced as a whole. Value
+     * nodes are compared with their own {@code ts}, so two values below the
+     * same parent are decided independently of each other.</p>
      */
-    private MergeOutcome mergeObject(ObjectNode here, ObjectNode otherNode, long now, Counter counter) {
+    private MergeOutcome mergeNode(ObjectNode here, ObjectNode otherNode, long now, Counter counter) {
+        long tsC = here.path(TS).asLong();
+        long tsS = otherNode.path(TS).asLong();
+
+        if (isValue(here) && isValue(otherNode)) {
+            return mergeValue(here, otherNode, now, counter);
+        }
+        if (!isValue(here) && !isValue(otherNode)) {
+            return mergeDirectory(here, otherNode, now, counter);
+        }
+        // kind conflict (directory on one side, value on the other): the newer
+        // node wins as a whole, because a directory and a value cannot coexist
+        ValueDecision decision = decide(tsC, tsS, now);
+        if (decision == ValueDecision.TAKE_IMPORTED) {
+            ObjectNode copy = otherNode.deepCopy();
+            stampAdded(copy, now, counter);
+            counter.updated++;
+            return new MergeOutcome(copy, true);
+        }
+        if (decision == ValueDecision.TAKE_CURRENT) {
+            counter.kept++;
+            ObjectNode out = here.deepCopy();
+            out.put(TS, clamp(tsC, now, counter));
+            return new MergeOutcome(out, false);
+        }
+        // equal timestamps but different kinds: keep the current shape
+        counter.kept++;
+        ObjectNode out = here.deepCopy();
+        out.put(TS, clamp(tsC, now, counter));
+        return new MergeOutcome(out, false);
+    }
+
+    /** Two value nodes under the same path: the newer payload wins. */
+    private MergeOutcome mergeValue(ObjectNode here, ObjectNode otherNode, long now, Counter counter) {
+        long tsC = here.path(TS).asLong();
+        long tsS = otherNode.path(TS).asLong();
+        if (Objects.equals(here.get(VAL), otherNode.get(VAL))) {
+            counter.valuesKept++;
+            counter.kept++;
+            ObjectNode out = here.deepCopy();
+            out.put(TS, clamp(tsC, now, counter));
+            return new MergeOutcome(out, false);
+        }
+        if (tsS > tsC) {
+            counter.valuesUpdated++;
+            counter.updated++;
+            ObjectNode out = otherNode.deepCopy();
+            out.put(TS, normativeTs(tsS, tsC, now, counter));
+            return new MergeOutcome(out, true);
+        }
+        counter.valuesKept++;
+        counter.kept++;
+        ObjectNode out = here.deepCopy();
+        out.put(TS, clamp(tsC, now, counter));
+        return new MergeOutcome(out, false);
+    }
+
+    /** What to do with a key that both trees hold. */
+    private enum ValueDecision { TAKE_CURRENT, TAKE_IMPORTED, EQUAL }
+
+    /** Compares timestamps: the newer side wins, a tie keeps the current side. */
+    private static ValueDecision decide(long tsC, long tsS, long now) {
+        if (tsS > tsC) {
+            return ValueDecision.TAKE_IMPORTED;
+        }
+        if (tsS == tsC) {
+            return ValueDecision.EQUAL;
+        }
+        return ValueDecision.TAKE_CURRENT;
+    }
+
+    /** Two directories under the same path: merge their children. */
+    private MergeOutcome mergeDirectory(ObjectNode here, ObjectNode otherNode, long now, Counter counter) {
         long tsC = here.path(TS).asLong();
         long tsS = otherNode.path(TS).asLong();
         ObjectNode out = here.deepCopy();
         boolean changed = false;
 
-        // keys the imported side has (children and values)
+        // keys the imported side has (subdirectories and values)
         for (Map.Entry<String, JsonNode> e : otherNode.properties()) {
             String name = e.getKey();
-            if (name.equals(TS)) {
-                continue;
+            if (isReserved(name)) {
+                continue; // "ts", and "nt"/"val" on a directory carry no content
             }
             JsonNode theirs = e.getValue();
             JsonNode mine = here.get(name);
-            if (theirs.isObject()) {
-                if (mine != null && mine.isObject()) {
-                    // same path on both sides: never replace the subtree, recurse
-                    MergeOutcome sub = mergeObject((ObjectNode) mine, (ObjectNode) theirs, now, counter);
-                    if (!sub.node().equals(mine)) {
-                        out.set(name, sub.node());
-                    }
-                    changed |= sub.changed();
-                } else if (mine != null) {
-                    // a node here, a value there: the newer owner wins
-                    if (tsS > tsC) {
-                        stampAdded((ObjectNode) theirs, tsS, now, counter);
-                        out.set(name, theirs.deepCopy());
-                        changed = true;
-                    } else {
-                        counter.kept++;
-                    }
-                } else {
-                    stampAdded((ObjectNode) theirs, tsS, now, counter);
-                    out.set(name, theirs.deepCopy());
-                    changed = true;
-                }
-            } else if (mine == null) {
-                out.set(name, theirs.deepCopy());
-                counter.valuesAdded++;
+            if (mine == null) {
+                // a path the current side lacks: take the whole subtree as is
+                ObjectNode copy = theirs.deepCopy();
+                stampAdded(copy, now, counter);
+                out.set(name, copy);
                 changed = true;
-            } else if (mine.isObject()) {
-                // a value here, a node there: the newer owner wins
-                if (tsS > tsC) {
-                    out.set(name, theirs.deepCopy());
-                    counter.valuesAdded++;
-                    changed = true;
-                } else {
-                    counter.kept++;
-                }
-            } else if (mine.equals(theirs)) {
-                counter.valuesKept++;
-            } else if (tsS > tsC) {
-                out.set(name, theirs.deepCopy());
-                counter.valuesUpdated++;
-                changed = true;
-            } else {
-                counter.valuesKept++;
+                continue;
             }
+            // same path on both sides: recurse; a recursive call can never
+            // replace a directory as a whole, so newer branch ts cannot wipe
+            // content that only the current side knows
+            MergeOutcome sub = mergeNode((ObjectNode) mine, (ObjectNode) theirs, now, counter);
+            if (!sub.node().equals(mine)) {
+                out.set(name, sub.node());
+            }
+            changed |= sub.changed();
         }
 
         // keys only the current side has are never removed: merging only adds.
@@ -604,7 +746,7 @@ public final class NodeTree {
         // in the imported tree is not evidence that anything was deleted.
         for (Iterator<String> it = here.fieldNames(); it.hasNext(); ) {
             String name = it.next();
-            if (!name.equals(TS) && !otherNode.has(name)) {
+            if (!isReserved(name) && !otherNode.has(name)) {
                 counter.kept++;
             }
         }
@@ -620,22 +762,22 @@ public final class NodeTree {
     }
 
     /**
-     * Records a whole node the current side lacks: it counts as added together
-     * with its descendants, and its timestamps are clamped to {@code now}.
+     * Records a whole subtree the current side lacks: it counts as added
+     * together with its descendants, and its timestamps are clamped to
+     * {@code now}.
      */
-    private static void stampAdded(ObjectNode node, long tsS, long now, Counter counter) {
-        node.put(TS, clamp(tsS, now, counter));
+    private static void stampAdded(ObjectNode node, long now, Counter counter) {
+        node.put(TS, clamp(node.path(TS).asLong(), now, counter));
+        if (isValue(node)) {
+            counter.valuesAdded++;
+            return;
+        }
         counter.added++;
         for (Map.Entry<String, JsonNode> e : node.properties()) {
-            String key = e.getKey();
-            if (key.equals(TS)) {
+            if (e.getKey().equals(TS) || !e.getValue().isObject()) {
                 continue;
             }
-            if (e.getValue().isObject()) {
-                stampAdded((ObjectNode) e.getValue(), e.getValue().path(TS).asLong(), now, counter);
-            } else {
-                counter.valuesAdded++;
-            }
+            stampAdded((ObjectNode) e.getValue(), now, counter);
         }
     }
 
@@ -669,10 +811,10 @@ public final class NodeTree {
         return clamp(Math.max(s, c), now, counter);
     }
 
-    private static List<String> childrenOf(ObjectNode node) {
+    private static List<String> directoriesOf(ObjectNode node) {
         List<String> out = new ArrayList<>();
         for (Map.Entry<String, JsonNode> e : node.properties()) {
-            if (e.getValue().isObject()) {
+            if (!isReserved(e.getKey()) && isDirectory(e.getValue())) {
                 out.add(e.getKey());
             }
         }
@@ -680,13 +822,14 @@ public final class NodeTree {
         return out;
     }
 
-    private static List<String> keysOf(ObjectNode node) {
+    private static List<String> valuesOf(ObjectNode node) {
         List<String> out = new ArrayList<>();
         for (Map.Entry<String, JsonNode> e : node.properties()) {
-            if (!e.getKey().equals(TS) && !e.getValue().isObject()) {
+            if (!isReserved(e.getKey()) && isValue(e.getValue())) {
                 out.add(e.getKey());
             }
         }
+        out.sort(String::compareTo);
         return out;
     }
 
@@ -708,7 +851,9 @@ public final class NodeTree {
     }
 
     private static SegmentLookup lookupSegment(ObjectNode parent, String name) {
-        List<String> children = childrenOf(parent);
+        // values are addressable too: a fuzzy alias may point at either kind
+        List<String> children = new ArrayList<>(directoriesOf(parent));
+        children.addAll(valuesOf(parent));
         if (children.contains(name)) {
             return new SegmentLookup(MatchKind.EXACT, name, List.of());
         }
@@ -778,7 +923,7 @@ public final class NodeTree {
 
     private static void collect(ObjectNode node, String prefix, Map<String, ObjectNode> out) {
         out.put(prefix.isEmpty() ? "/" : prefix, node);
-        for (String child : childrenOf(node)) {
+        for (String child : directoriesOf(node)) {
             collect((ObjectNode) node.get(child), prefix + "/" + child, out);
         }
     }

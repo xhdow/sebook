@@ -30,9 +30,11 @@ public final class SelfCheck {
         treePathNavigation();
         treeJsonRoundTrip();
         treeReservedKey();
+        treeValueNodes();
         mergeAddsNewPaths();
-        mergeLeafNewerWins();
-        mergeLeafOlderLoses();
+        mergeSiblingsIndependently();
+        mergeValueNewerWins();
+        mergeValueOlderLoses();
         mergeIntermediateNodeUnionsSubtree();
         mergeNeverDeletes();
         mergeFutureTsClamped();
@@ -175,16 +177,55 @@ public final class SelfCheck {
         t.set("tags", JsonNodeFactory.instance.arrayNode().add("a").add("b"));
         check("pwd after cd", t.pwd().equals("/work"));
         check("ls has deep", t.ls().equals(java.util.List.of("deep")));
-        check("keys", t.keys().equals(java.util.List.of("title", "count", "done", "tags")),
+        check("keys are sorted", t.keys().equals(java.util.List.of("count", "done", "tags", "title")),
                 "got=" + t.keys());
         check("dirty", t.isDirty());
         checkThrows("mkdir duplicate", NodeTreeException.class, () -> t.mkdir("deep"));
-        checkThrows("set over child", NodeTreeException.class,
+        checkThrows("set over directory", NodeTreeException.class,
                 () -> t.set("deep", JsonNodeFactory.instance.textNode("x")));
+        check("value node shape", t.entry("title").path(NodeTree.NT).asText().equals(NodeTree.NT_VALUE)
+                && t.entry("title").path(NodeTree.VAL).asText().equals("proj"), t.current().toPrettyString());
+        check("directory node shape", t.entry("deep").path(NodeTree.NT).asText().equals(NodeTree.NT_DIR));
         t.cd("..");
         check("cd ..", t.pwd().equals("/"));
         t.rmdir("work");
         check("rmdir", t.ls().isEmpty());
+    }
+
+    private static void treeValueNodes() throws Exception {
+        NodeTree t = new NodeTree();
+        t.mkdir("a");
+        t.cd("a");
+        t.set("user", JsonNodeFactory.instance.textNode("tom"));
+        t.set("password", JsonNodeFactory.instance.textNode("123"));
+        long parentTs = t.ts();
+        long userTs = t.entry("user").path(NodeTree.TS).asLong();
+        check("value carries its own ts", userTs > 0 && userTs == parentTs);
+
+        Thread.sleep(2);
+        t.set("user", JsonNodeFactory.instance.textNode("tom2"));
+        long newUserTs = t.entry("user").path(NodeTree.TS).asLong();
+        long pwdTs = t.entry("password").path(NodeTree.TS).asLong();
+        check("editing a value updates its own ts", newUserTs > userTs);
+        check("editing a value leaves siblings' ts alone", pwdTs == userTs);
+
+        check("get returns the payload", "tom2".equals(t.get("user").asText()));
+        checkThrows("value is not a directory", NodeTreeException.class, () -> t.cd("user"));
+        check("cd to value rejected, cwd unchanged", t.pwd().equals("/a"));
+
+        // the model still allows any JSON payload inside "val"
+        t.set("profile", new com.fasterxml.jackson.databind.ObjectMapper().readTree("{\"x\":1}"));
+        check("object payload allowed", t.get("profile").isObject(), t.current().toPrettyString());
+
+        check("clear removes a value", t.clear("profile"));
+        check("clear ignores missing keys", !t.clear("profile"));
+
+        // .set stores text verbatim: no number/boolean re-interpretation
+        NodeTree text = new NodeTree();
+        text.set("pwd", JsonNodeFactory.instance.textNode("000888"));
+        check("leading zeros preserved", "000888".equals(text.get("pwd").asText()));
+        text.set("pwd", JsonNodeFactory.instance.textNode("888"));
+        check("000888 and 888 are different values", "888".equals(text.get("pwd").asText()));
     }
 
     private static void treePropagation() throws Exception {
@@ -255,16 +296,27 @@ public final class SelfCheck {
         checkThrows("bad top-level", NodeTreeException.class, () -> NodeTree.fromJson("[1,2]"));
         checkThrows("bad json", NodeTreeException.class, () -> NodeTree.fromJson("{oops"));
         checkThrows("missing ts in child", NodeTreeException.class,
-                () -> NodeTree.fromJson("{\"ts\":1,\"child\":{\"x\":1}}"));
-        NodeTree rootNoTs = NodeTree.fromJson("{\"a\":{\"ts\":1}}");
+                () -> NodeTree.fromJson("{\"ts\":1,\"child\":{\"nt\":\"d\"}}"));
+        NodeTree rootNoTs = NodeTree.fromJson("{\"a\":{\"ts\":1,\"nt\":\"d\"}}");
         check("root ts auto-filled", rootNoTs.ts() > 0);
+        checkThrows("raw value in directory rejected", NodeTreeException.class,
+                () -> NodeTree.fromJson("{\"ts\":1,\"a\":\"x\"}"));
+        checkThrows("value node without payload rejected", NodeTreeException.class,
+                () -> NodeTree.fromJson("{\"ts\":1,\"a\":{\"ts\":1,\"nt\":\"v\"}}"));
+        checkThrows("directory with a payload rejected", NodeTreeException.class,
+                () -> NodeTree.fromJson("{\"ts\":1,\"a\":{\"ts\":1,\"nt\":\"d\",\"val\":1}}"));
+        NodeTree ok = NodeTree.fromJson(
+                "{\"ts\":1,\"a\":{\"ts\":2,\"nt\":\"v\",\"val\":\"x\"},\"b\":{\"ts\":3,\"nt\":\"d\"}}");
+        check("value payload parsed", "x".equals(ok.get("a").asText()));
     }
 
     private static void treeReservedKey() throws Exception {
         NodeTree t = new NodeTree();
-        checkThrows("set ts forbidden", NodeTreeException.class,
-                () -> t.set("ts", JsonNodeFactory.instance.numberNode(1)));
-        checkThrows("mkdir ts forbidden", NodeTreeException.class, () -> t.mkdir("ts"));
+        for (String key : new String[] {"ts", "nt", "val"}) {
+            checkThrows("set " + key + " forbidden", NodeTreeException.class,
+                    () -> t.set(key, JsonNodeFactory.instance.textNode("x")));
+            checkThrows("mkdir " + key + " forbidden", NodeTreeException.class, () -> t.mkdir(key));
+        }
         checkThrows("blank key forbidden", NodeTreeException.class,
                 () -> t.set("  ", JsonNodeFactory.instance.textNode("x")));
     }
@@ -275,127 +327,153 @@ public final class SelfCheck {
         return NodeTree.fromJson(json);
     }
 
-    private static String leaf(NodeTree t, String path, String key) throws NodeTreeException {
-        return t.nodeAt(path).path(key).asText();
+    /** A value node as it appears in JSON: {"ts":..,"nt":"v","val":..}. */
+    private static String v(long ts, String payload) {
+        return "{\"ts\":" + ts + ",\"nt\":\"v\",\"val\":" + payload + "}";
+    }
+
+    /** The payload of the value at {@code path}. */
+    private static String val(NodeTree t, String path) throws NodeTreeException {
+        return t.nodeAt(path).path(NodeTree.VAL).asText();
+    }
+
+    private static long tsOf(NodeTree t, String path) throws NodeTreeException {
+        return t.nodeAt(path).path(NodeTree.TS).asLong();
     }
 
     private static void mergeAddsNewPaths() throws Exception {
-        NodeTree c = parse("{\"ts\":1000,\"work\":{\"ts\":1000,\"title\":\"old\"}}");
-        NodeTree s = parse("{\"ts\":2000,\"work\":{\"ts\":2000,\"title\":\"old\","
-                + "\"deep\":{\"ts\":1500,\"note\":\"hello\"}},\"home\":{\"ts\":2000,\"x\":1}}");
+        NodeTree c = parse("{\"ts\":1000,\"work\":{\"ts\":1000,\"title\":" + v(1000, "\"old\"") + "}}");
+        NodeTree s = parse("{\"ts\":2000,\"work\":{\"ts\":2000,\"title\":" + v(1000, "\"old\"") + ","
+                + "\"deep\":{\"ts\":1500,\"note\":" + v(1500, "\"hello\"") + "}},"
+                + "\"home\":{\"ts\":2000,\"x\":" + v(2000, "1") + "}}");
         notebook.tree.MergeStats st = c.merge(s);
-        check("merge adds missing node", c.nodeAt("/home") != null);
-        check("merge adds missing child", leaf(c, "/work/deep", "note").equals("hello"));
-        check("merge added node keeps imported ts",
-                c.nodeAt("/home").path("ts").asLong() == 2000, "ts=" + c.nodeAt("/home").path("ts"));
-        check("merge counts added nodes", st.added() == 2, st.describe());
+        check("merge adds missing directory", c.nodeAt("/home") != null);
+        check("merge adds missing value", "hello".equals(val(c, "/work/deep/note")));
+        check("merge adds nested directory", c.nodeAt("/work/deep") != null);
+        check("merge counts added directories", st.added() == 2, st.describe());
+        check("merge counts added values", st.valuesAdded() == 2, st.describe());
         check("merge marks dirty", c.isDirty());
-        check("merge counts kept value", st.valuesKept() == 1, st.describe());
     }
 
-    private static void mergeLeafNewerWins() throws Exception {
-        NodeTree c = parse("{\"ts\":1000,\"pwd\":\"old\",\"ts0\":0}");
-        NodeTree s = parse("{\"ts\":1200,\"pwd\":\"new\"}");
+    /**
+     * The case the value-node model exists for: C edited "user" and S edited
+     * "password" under the same parent. Both edits must survive.
+     */
+    private static void mergeSiblingsIndependently() throws Exception {
+        NodeTree c = parse("{\"ts\":5000,\"a\":{\"ts\":5000,\"b\":{\"ts\":5000,"
+                + "\"user\":" + v(1000, "\"tom-C\"") + ","
+                + "\"password\":" + v(1000, "\"pw-old\"") + "}}}");
+        NodeTree s = parse("{\"ts\":9000,\"a\":{\"ts\":9000,\"b\":{\"ts\":9000,"
+                + "\"user\":" + v(1000, "\"tom-old\"") + ","
+                + "\"password\":" + v(8000, "\"pw-S\"") + "}}}");
         c.merge(s);
-        check("merge takes newer leaf", leaf(c, "/", "pwd").equals("new"));
-        check("leaf missing in S is kept even when S's owner is newer",
-                c.current().has("ts0"), c.toJson());
-        long ts = c.ts();
-        check("changed root ts is max(S,C) or now", ts >= 1200 && ts <= System.currentTimeMillis(),
-                "ts=" + ts);
+        check("edited user is kept", "tom-C".equals(val(c, "/a/b/user")), c.toJson());
+        check("edited password is taken", "pw-S".equals(val(c, "/a/b/password")), c.toJson());
+        check("user keeps its own newer ts", tsOf(c, "/a/b/user") == 1000);
+        check("password carries the newer ts", tsOf(c, "/a/b/password") == 8000);
     }
 
-    private static void mergeLeafOlderLoses() throws Exception {
-        NodeTree c = parse("{\"ts\":2000,\"pwd\":\"current\"}");
-        NodeTree s = parse("{\"ts\":1000,\"pwd\":\"stale\"}");
+    private static void mergeValueNewerWins() throws Exception {
+        NodeTree c = parse("{\"ts\":1000,\"pwd\":" + v(900, "\"old\"") + "}");
+        NodeTree s = parse("{\"ts\":1200,\"pwd\":" + v(1100, "\"new\"") + "}");
         c.merge(s);
-        check("older leaf on imported side loses", leaf(c, "/", "pwd").equals("current"));
-        check("losing merge keeps ts untouched", c.ts() == 2000, "ts=" + c.ts());
-        check("losing merge stays clean", !c.isDirty());
+        check("newer value wins", "new".equals(val(c, "/pwd")));
+        check("winning value gets min(max,now)", tsOf(c, "/pwd") == 1100, "ts=" + tsOf(c, "/pwd"));
+        check("parent ts becomes max(S,C)", tsOf(c, "/") >= 1200);
+    }
+
+    private static void mergeValueOlderLoses() throws Exception {
+        NodeTree c = parse("{\"ts\":2000,\"pwd\":" + v(2000, "\"current\"") + "}");
+        NodeTree s = parse("{\"ts\":3000,\"pwd\":" + v(1000, "\"stale\"") + "}");
+        c.merge(s);
+        check("older value loses even when S's parent is newer", "current".equals(val(c, "/pwd")));
+        check("loser keeps its ts", tsOf(c, "/pwd") == 2000);
+        check("losing merge stays clean", !c.isDirty(), c.toJson());
     }
 
     private static void mergeIntermediateNodeUnionsSubtree() throws Exception {
         // S is newer at "work" but older at "work/deep"; deep must not be wiped,
-        // and the node only C knows below it must survive.
+        // and the value only C knows below it must survive.
         NodeTree c = parse("{\"ts\":5000,\"work\":{\"ts\":5000,"
-                + "\"deep\":{\"ts\":400,\"mine\":\"keep-me\"}},"
+                + "\"deep\":{\"ts\":400,\"mine\":" + v(400, "\"keep-me\"") + "}},"
                 + "\"onlyInC\":{\"ts\":5000}}");
         NodeTree s = parse("{\"ts\":4000,\"work\":{\"ts\":9000,"
-                + "\"deep\":{\"ts\":100,\"theirs\":\"added\"}},"
+                + "\"deep\":{\"ts\":100,\"theirs\":" + v(100, "\"added\"") + "}},"
                 + "\"onlyInS\":{\"ts\":4000}}");
         c.merge(s);
-        check("newer intermediate keeps older descendant", leaf(c, "/work/deep", "mine").equals("keep-me"));
-        check("newer intermediate adds newer descendant", leaf(c, "/work/deep", "theirs").equals("added"));
-        // stored at the same path in both trees, but only C has it: kept, never removed
-        check("sibling missing in newer owner kept", c.nodeAt("/onlyInC") != null);
+        check("newer intermediate keeps older descendant value",
+                "keep-me".equals(val(c, "/work/deep/mine")));
+        check("newer intermediate adds newer descendant value",
+                "added".equals(val(c, "/work/deep/theirs")));
+        check("sibling missing in imported tree kept", c.nodeAt("/onlyInC") != null);
         check("node only S knows added", c.nodeAt("/onlyInS") != null);
         check("changed intermediate ts = min(max(S,C),now)",
-                c.nodeAt("/work").path("ts").asLong() <= System.currentTimeMillis()
-                        && c.nodeAt("/work").path("ts").asLong() >= 5000);
+                tsOf(c, "/work") <= System.currentTimeMillis() && tsOf(c, "/work") >= 5000);
     }
 
     private static void mergeNeverDeletes() throws Exception {
         // Two independently used notebooks: different branches under the same
         // parent must all survive, no matter which side is newer.
         NodeTree c = parse("{\"ts\":1000,\"google\":{\"ts\":1000,"
-                + "\"projectA\":{\"ts\":1000,\"note\":\"mine\"}}}");
+                + "\"projectA\":{\"ts\":1000,\"note\":" + v(1000, "\"mine\"") + "}}}");
         NodeTree s = parse("{\"ts\":9000,\"google\":{\"ts\":9000,"
-                + "\"projectB\":{\"ts\":9000,\"note\":\"theirs\"}}}");
+                + "\"projectB\":{\"ts\":9000,\"note\":" + v(9000, "\"theirs\"") + "}}}");
         c.merge(s);
-        check("branch only C knows survives a much newer S",
-                c.nodeAt("/google/projectA") != null);
-        check("branch only C knows keeps its value", "mine".equals(leaf(c, "/google/projectA", "note")));
-        check("branch only S knows is added", "theirs".equals(leaf(c, "/google/projectB", "note")));
+        check("branch only C knows survives a much newer S", c.nodeAt("/google/projectA") != null);
+        check("branch only C knows keeps its value", "mine".equals(val(c, "/google/projectA/note")));
+        check("branch only S knows is added", "theirs".equals(val(c, "/google/projectB/note")));
 
-        // A root that S knows nothing about at all is still untouched.
-        NodeTree c2 = parse("{\"ts\":2500,\"local\":{\"ts\":2500,\"x\":1},\"v\":\"cur\"}");
+        // A tree that S knows nothing about at all is still untouched.
+        NodeTree c2 = parse("{\"ts\":2500,\"local\":{\"ts\":2500,\"x\":" + v(2500, "1") + "},"
+                + "\"v\":" + v(2500, "\"cur\"") + "}");
         NodeTree s2 = parse("{\"ts\":3000}");
         c2.merge(s2);
-        check("node missing in newer S kept", c2.nodeAt("/local") != null);
-        check("value missing in newer S kept", "cur".equals(leaf(c2, "/", "v")));
+        check("directory missing in newer S kept", c2.nodeAt("/local") != null);
+        check("value missing in newer S kept", "cur".equals(val(c2, "/v")));
         check("nothing to change leaves tree clean", !c2.isDirty(), c2.toJson());
     }
 
     private static void mergeFutureTsClamped() throws Exception {
         long before = System.currentTimeMillis();
-        NodeTree c = parse("{\"ts\":1000,\"a\":\"x\"}");
-        NodeTree s = parse("{\"ts\":999999999999999999,\"a\":\"y\"}");
+        NodeTree c = parse("{\"ts\":1000,\"a\":" + v(1000, "\"x\"") + "}");
+        NodeTree s = parse("{\"ts\":999999999999999999,\"a\":" + v(999999999999999999L, "\"y\"") + "}");
         c.merge(s);
         long after = System.currentTimeMillis();
-        long ts = c.ts();
-        check("future ts clamped to now", ts >= before && ts <= after, "ts=" + ts);
-        check("future leaf still wins", "y".equals(leaf(c, "/", "a")));
+        check("future value ts clamped to now", tsOf(c, "/a") >= before && tsOf(c, "/a") <= after,
+                "ts=" + tsOf(c, "/a"));
+        check("future value still wins", "y".equals(val(c, "/a")));
     }
 
     private static void mergeKeptTreeIsNoOp() throws Exception {
-        NodeTree c = parse("{\"ts\":1000,\"work\":{\"ts\":1000,\"title\":\"t\"}}");
-        NodeTree s = parse("{\"ts\":1000,\"work\":{\"ts\":1000,\"title\":\"t\"}}");
+        String body = "{\"ts\":1000,\"work\":{\"ts\":1000,\"title\":" + v(1000, "\"t\"") + "}}";
+        NodeTree c = parse(body);
+        NodeTree s = parse(body);
         String beforeJson = c.toJson();
         notebook.tree.MergeStats st = c.merge(s);
         check("identical merge keeps json", c.toJson().equals(beforeJson));
         check("identical merge not dirty", !c.isDirty());
         check("identical merge counts as kept", st.updated() == 0 && st.added() == 0, st.describe());
 
-        NodeTree older = parse("{\"ts\":500,\"work\":{\"ts\":500,\"title\":\"t\"}}");
+        NodeTree older = parse("{\"ts\":500,\"work\":{\"ts\":500,\"title\":" + v(500, "\"t\"") + "}}");
         c.merge(older);
         check("older twin keeps json", c.toJson().equals(beforeJson));
         check("older twin not dirty", !c.isDirty());
     }
 
     private static void mergeIsAtomicAndPlain() throws Exception {
-        NodeTree c = parse("{\"ts\":5000,\"keep\":\"x\"}");
-        NodeTree s = parse("{\"ts\":3000,\"fresh\":{\"ts\":3000,\"y\":1}}");
+        NodeTree c = parse("{\"ts\":5000,\"keep\":" + v(5000, "\"x\"") + "}");
+        NodeTree s = parse("{\"ts\":3000,\"fresh\":{\"ts\":3000,\"y\":" + v(3000, "1") + "}}");
         String sBefore = s.toJson();
         c.merge(s);
         check("imported tree not modified", s.toJson().equals(sBefore));
         check("merge resets cwd to root", c.pwd().equals("/"));
-        check("merge result readable", leaf(c, "/fresh", "y").equals("1"));
-        check("node whose version is not newer survives", "x".equals(leaf(c, "/", "keep")));
+        check("merge result readable", "1".equals(val(c, "/fresh/y")));
+        check("node whose version is not newer survives", "x".equals(val(c, "/keep")));
 
         // a copied tree is independent of the source and starts clean
         NodeTree copy = c.copy();
         c.set("keep", JsonNodeFactory.instance.textNode("changed"));
-        check("copy is independent", "x".equals(leaf(copy, "/", "keep")), copy.toJson());
+        check("copy is independent", "x".equals(val(copy, "/keep")), copy.toJson());
         check("copy starts clean", !copy.isDirty());
         checkThrows("malformed import rejected", NodeTreeException.class,
                 () -> NodeTree.fromJson("{\"ts\":1,\"c\":{\"y\":1}}"));

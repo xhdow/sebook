@@ -201,12 +201,10 @@ public final class NotebookCli {
             }
             case ".pwd" -> { out.println(tree.pwd()); return false; }
             case ".ls", ".ll" -> { list(cmd.equals(".ll")); return false; }
-            case ".get" -> { requireArgs(cmd, args, 1); doGet(args[0]); return false; }
             case ".set" -> { requireArgs(cmd, args, 2); doSet(args); return false; }
-            case ".del", ".unset" -> { requireArgs(cmd, args, 1); doDel(args[0]); return false; }
+            // .rm deletes a value or a directory; the target's own kind decides
+            case ".rm", ".rmdir" -> { requireArgs(cmd, args, 1); doDelete(args); return false; }
             case ".mkdir" -> { requireArgs(cmd, args, 1); doMkdir(args[0]); return false; }
-            case ".rm", ".rmdir" -> { requireArgs(cmd, args, 1); doRm(args); return false; }
-            case ".ts" -> { out.println(tree.pwd() + "  ts=" + tree.ts() + "  (" + fmtTs(tree.ts()) + ")"); return false; }
             case ".pass" -> { doPass(args); return false; }
             case ".save" -> { doSave(); return false; }
             case ".export" -> { requireArgs(cmd, args, 1); doExport(Path.of(args[0])); return false; }
@@ -306,58 +304,49 @@ public final class NotebookCli {
         return pool.charAt(SECURE_RANDOM.nextInt(pool.length()));
     }
 
-    private void doGet(String key) {
-        JsonNode v = tree.get(key);
-        if (v == null) {
-            out.println("(missing)");
-        } else if (v.isObject()) {
-            out.println("'" + key + "' is a child node; use .cd " + key);
-        } else {
-            out.println(v.isTextual() ? v.asText() : v.toPrettyString());
-        }
-    }
-
     private void doSet(String[] args) throws NodeTreeException {
         String key = args[0];
+        // every value is stored verbatim as a string: leading zeros, "true"
+        // and "123" are never reinterpreted, so what you type is what you get
         String raw = String.join(" ", Arrays.copyOfRange(args, 1, args.length));
-        tree.set(key, parseValue(raw));
+        tree.set(key, JsonNodeFactory.instance.textNode(raw));
         out.println("set " + key + "  [dirty]");
+        // confirm the result right away instead of leaving the user to .ls
+        list(false, false);
     }
 
-    private void doDel(String key) throws NodeTreeException {
-        if (tree.clear(key)) {
-            out.println("removed " + key + "  [dirty]");
-        } else {
-            out.println("no such value: " + key);
-        }
-    }
-
-    private void doMkdir(String name) throws NodeTreeException {
-        tree.mkdir(name);
-        String base = tree.pwd().equals("/") ? "/" : tree.pwd() + "/";
-        out.println("created node " + base + name + "  [dirty]");
-    }
-
-    private void doRm(String[] args) throws NodeTreeException, IOException {
+    /**
+     * Deletes whatever sits under {@code name}: a value, or a directory with
+     * everything below it. The kind is taken from the entry itself instead of
+     * from the command name.
+     */
+    private void doDelete(String[] args) throws NodeTreeException, IOException {
         String name = args[0];
         boolean force = args.length > 1 && args[1].equals("--force");
+        if (tree.hasValue(name)) {
+            tree.clear(name);
+            out.println("removed value " + name + "  [dirty]");
+            return;
+        }
         if (!tree.hasChild(name)) {
-            if (tree.hasValue(name)) {
-                out.println("'" + name + "' is a value; use .del " + name);
-            } else {
-                out.println("no such node: " + name);
-            }
+            out.println("no such node: " + name);
             return;
         }
         if (!force) {
-            out.print("delete node '" + name + "' and everything below it? [y/N] ");
+            out.print("delete directory '" + name + "' and everything below it? [y/N] ");
             if (!isYes(readLine())) {
                 out.println("cancelled.");
                 return;
             }
         }
         tree.rmdir(name);
-        out.println("deleted " + name + "  [dirty]");
+        out.println("deleted directory " + name + "  [dirty]");
+    }
+
+    private void doMkdir(String name) throws NodeTreeException {
+        tree.mkdir(name);
+        String base = tree.pwd().equals("/") ? "/" : tree.pwd() + "/";
+        out.println("created node " + base + name + "  [dirty]");
     }
 
     private void doSave() throws VaultException, IOException {
@@ -520,14 +509,24 @@ public final class NotebookCli {
             out.println("  [dir ] " + c + "/" + (longFormat ? "   ts=" + fmtTs(ts) : ""));
         }
         for (String k : keys) {
-            JsonNode v = tree.current().get(k);
-            String preview = longFormat ? v.toPrettyString() : preview(v);
-            out.println("  [val ] " + k + " = " + preview);
+            // each value node carries its own ts; show that, not the parent's
+            JsonNode entry = tree.entry(k);
+            long ts = entry.path(NodeTree.TS).asLong();
+            JsonNode v = entry.get(NodeTree.VAL);
+            // .ls and .ll differ only in truncation and timestamps, never in
+            // how a value is rendered: text is shown as-is in both
+            String shown = longFormat ? full(v) : preview(v);
+            out.println("  [val ] " + k + " = " + shown + (longFormat ? "   ts=" + fmtTs(ts) : ""));
         }
     }
 
+    /** Renders a value payload without JSON quoting: text as-is, other JSON verbatim. */
+    private static String full(JsonNode v) {
+        return v == null || v.isNull() ? "(null)" : v.isTextual() ? v.asText() : v.toPrettyString();
+    }
+
     private static String preview(JsonNode v) {
-        String s = v.isTextual() ? v.asText() : v.toString();
+        String s = full(v);
         if (s.length() > 60) {
             s = s.substring(0, 57) + "...";
         }
@@ -547,18 +546,19 @@ public final class NotebookCli {
     private void help() {
         out.println("""
                 navigation
-                  .cd <path|name>     change node and list its contents
-                                      (fuzzy names allowed, / .. . supported)
+                  .cd <path|name>     change directory and list its contents
+                                      (fuzzy names allowed, / .. . supported;
+                                       values cannot be entered)
                   .pwd                print current path
-                  .ls                 list children and values of current node
-                  .ll                 same as .ls with local timestamps and full values
-                  .ts                 show current node timestamp
+                  .ls                 list subdirectories and values of current node
+                  .ll                 same as .ls with each node's own timestamp
+                                      and untruncated values
                 editing
-                  .get <key>          read a value
-                  .set <key> <value>  set a value (numbers, true/false, JSON are auto-detected)
-                  .del <key>          delete a value
-                  .mkdir <name>       create a child node
-                  .rm <name> [--force] delete a child node and everything below it
+                  .set <key> <value>  set a value; stored as text exactly as typed,
+                                      then the current node is listed
+                  .rm <name> [--force] delete a value or directory; a directory
+                                      asks for confirmation unless --force
+                  .mkdir <name>       create a subdirectory
                 persistence
                   .save               encrypt and write the vault file (asks for the
                                       password twice and verifies it before writing)
@@ -640,39 +640,4 @@ public final class NotebookCli {
         return tokens.toArray(new String[0]);
     }
 
-    /** Interprets a raw CLI value as JSON when possible, else as a string. */
-    static JsonNode parseValue(String raw) {
-        String t = raw.strip();
-        if (t.equalsIgnoreCase("true")) {
-            return JsonNodeFactory.instance.booleanNode(true);
-        }
-        if (t.equalsIgnoreCase("false")) {
-            return JsonNodeFactory.instance.booleanNode(false);
-        }
-        if (t.equalsIgnoreCase("null")) {
-            return JsonNodeFactory.instance.nullNode();
-        }
-        if (t.startsWith("{") || t.startsWith("[")) {
-            try {
-                JsonNode parsed = new com.fasterxml.jackson.databind.ObjectMapper().readTree(t);
-                if (parsed != null && parsed.isObject()) {
-                    return JsonNodeFactory.instance.textNode(raw);
-                }
-                return parsed;
-            } catch (Exception ignored) {
-                // fall through to string
-            }
-        }
-        try {
-            if (t.matches("-?\\d+")) {
-                return JsonNodeFactory.instance.numberNode(Long.parseLong(t));
-            }
-            if (t.matches("-?\\d+\\.\\d+([eE][-+]?\\d+)?")) {
-                return JsonNodeFactory.instance.numberNode(Double.parseDouble(t));
-            }
-        } catch (NumberFormatException ignored) {
-            // fall through to string
-        }
-        return JsonNodeFactory.instance.textNode(raw);
-    }
 }

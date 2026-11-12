@@ -50,15 +50,12 @@ written. Afterwards you unlock with the same password.
 
 | command | description |
 | --- | --- |
-| `.cd <path\|name>` | change node and list its contents; absolute (`/a/b`), relative (`a/b`), `..`, `.`; fuzzy names allowed |
+| `.cd <path\|name>` | change directory and list its contents; absolute (`/a/b`), relative (`a/b`), `..`, `.`; fuzzy names allowed; values cannot be entered |
 | `.pwd` | print current path |
-| `.ls` / `.ll` | list children (`/`) and values; `.ll` also shows local timestamps |
-| `.ts` | timestamp of the current node |
-| `.get <key>` | read a value |
-| `.set <key> <value>` | set a value; numbers, `true`/`false` and JSON are auto-detected |
-| `.del <key>` | delete a value |
-| `.mkdir <name>` | create a child node |
-| `.rm <name> [--force]` | delete a child node and everything below it |
+| `.ls` / `.ll` | list subdirectories and values; `.ll` also shows each node's own timestamp |
+| `.set <key> <value>` | set a value, stored as text exactly as typed; the node is listed afterwards |
+| `.rm <name> [--force]` | delete a value, or a directory and everything below it (asks first) |
+| `.mkdir <name>` | create a subdirectory |
 | `.save` | encrypt and write the vault file (password entered twice and verified) |
 | `.export <file>` | export **decrypted** JSON (asks for confirmation) |
 | `.import <file>` | merge a plaintext notebook JSON into the current one (see below) |
@@ -82,9 +79,10 @@ unioned instead of the newer one replacing the whole subtree:
 - path only in the imported file: added as-is (its `ts` values are kept);
 - path only in the current notebook: **always kept**. Merging only ever adds,
   so two notebooks used for different work both keep their branches (deleting
-  is still done explicitly with `.rm` / `.del`);
-- a value present on both sides with different content: the newer one wins
-  (a tie keeps the current value);
+  is still done explicitly with `.rm`);
+- a value present on both sides with different content: the newer one wins,
+  compared by the value's **own** `ts` (a tie keeps the current value), so
+  values under the same directory are decided independently;
 - kept decisions change nothing, so kept nodes keep their own `ts`.
 
 A node whose content changed ends up with
@@ -123,30 +121,40 @@ dist\filetool.cmd info photo.jpg.enc                # header metadata + salt/non
 
 ## Data model
 
-Every node is a JSON object. A key whose value is an object is a **child node**;
-any other value is a **leaf value**. There is no separate `children` field.
+Every entry is a JSON object with its own numeric `ts`. The reserved key `nt`
+selects the kind:
+
+- **directory** — `nt` is absent or `"d"`; its other keys are its children;
+- **value** — `nt` is `"v"`; its payload lives in `val` and may be any JSON
+  value (string, number, boolean, array, object, null).
 
 ```json
 {
   "ts": 1794312289193,
-  "title": "root",
+  "nt": "d",
+  "title": { "ts": 1794312289193, "nt": "v", "val": "root" },
   "work": {
     "ts": 1794312289193,
-    "title": "project",
+    "nt": "d",
     "deep": {
       "ts": 1794312289193,
-      "note": "hello"
+      "nt": "d",
+      "note": { "ts": 1794312289193, "nt": "v", "val": "hello" }
     }
   }
 }
 ```
 
-- Every object node has a reserved numeric `ts` field (epoch milliseconds).
-- Any change updates the affected node's `ts` **and every ancestor up to the
-  root**.
-- Setting a value equal to the existing one is a no-op and does not change `ts`.
+- Every node has its own `ts` (epoch milliseconds), values included.
+- Writing a value updates that value's `ts` **and every ancestor up to the
+  root**; sibling values are untouched.
+- Writing a value equal to the existing one is a no-op and does not change any
+  `ts`.
+- Only directories can be entered with `.cd`; values are shown by `.ls` / `.ll`.
 - Navigation is read-only and never touches `ts`.
-- `ts` cannot be created, overwritten or deleted as a user key.
+- `ts`, `nt` and `val` cannot be created, overwritten or deleted as child names.
+- A value's own `ts` is what makes merging two notebooks unambiguous: `user`
+  and `password` edited on different sides merge independently.
 
 ## Security notes
 
