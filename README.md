@@ -247,7 +247,6 @@ Requires JDK 17+ (`javac`/`jar` on `PATH`). The third-party jars are vendored in
 
 The build output is `dist\sebook.jar` plus `dist\lib\` and `dist\filetool.cmd`.
 
-## License
 
-Add a license of your choice (for example MIT or Apache-2.0) before publishing
-this repository.
+## License
+This project is licensed under AGPLv3. Third-party dependencies retain their original licenses.

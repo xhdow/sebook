@@ -1,0 +1,20 @@
+sebook
+Copyright (C) 2026 xhdow
+
+This product includes software developed by third parties. 
+The following third-party components are included in this product:
+
+================================================================================
+1. Jackson JSON
+================================================================================
+Copyright (c) 2008-2026 FasterXML, LLC
+License: Apache License 2.0
+Full license text available at: https://www.apache.org/licenses/LICENSE-2.0
+
+================================================================================
+2. Bouncy Castle (bcprov-jdk18on)
+================================================================================
+Copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc.
+License: Bouncy Castle License (MIT-style)
+Full license text available at: https://www.bouncycastle.org/licence.html
+
