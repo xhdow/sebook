@@ -1,9 +1,9 @@
 package notebook.tree;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -16,7 +16,6 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
@@ -131,6 +130,17 @@ public final class NodeTree {
                 normalize((ObjectNode) e.getValue(), path + e.getKey() + "/", now, false);
             }
         }
+    }
+
+    /**
+     * A private, independent copy of this tree.
+     *
+     * <p>The copy starts at the root and starts out clean, even when this tree
+     * has unsaved changes. Describes exactly the state that a fresh
+     * {@link #fromJson(String)} of {@link #toJson()} would produce.</p>
+     */
+    public NodeTree copy() throws NodeTreeException {
+        return fromJson(toJson());
     }
 
     /** Serializes the whole tree to pretty-printed JSON. */
@@ -444,6 +454,219 @@ public final class NodeTree {
         if (key.equals(TS)) {
             throw new NodeTreeException("'" + TS + "' is a reserved key");
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Merging
+    // ---------------------------------------------------------------------
+
+    /**
+     * Three-way merges another tree into this one, starting at the root.
+     *
+     * <p>Let {@code C} be this tree and {@code S} the imported one. Every node
+     * is aligned by its position (its path from the root). When a value only
+     * one side has is merged, the ancestor links are filled with its owning
+     * object's timestamp, which is the {@code ts} the other side would have
+     * stored had it known the value too.</p>
+     *
+     * <h2>Nodes</h2>
+     * <ul>
+     *   <li>A path only {@code S} has is added verbatim.</li>
+     *   <li>A path only {@code C} has is kept. Merging only ever adds: the two
+     *       notebooks may describe different work (say {@code projectA} on one
+     *       side and {@code projectB} on the other), so a path missing from
+     *       {@code S} is not evidence that it was deleted. Use {@code .rm} to
+     *       delete explicitly.</li>
+     *   <li>A path both have is recursed into. It keeps the structure of both
+     *       sides, so a newer {@code ts} on an intermediate node is never
+     *       treated as a replacement for the whole subtree. Its content is the
+     *       union of both sides.</li>
+     * </ul>
+     *
+     * <h2>Leaves</h2>
+     * <p>A key holding different values on both sides keeps the newer one
+     * ({@code ts(S.owner)} versus {@code ts(C.owner)}; a tie keeps the current
+     * value). Missing on either side counts as old.</p>
+     *
+     * <h2>Timestamps</h2>
+     * <p>The merged {@code ts} obeys {@code min(max(S.ts, C.ts), now)}:</p>
+     * <ul>
+     *   <li>A node added whole keeps the imported timestamp of itself and of
+     *       every node below it, clamped to {@code now}.</li>
+     *   <li>A node whose content changed gets {@code min(max(S.ts, C.ts), now)}.</li>
+     *   <li>A node that ends up unchanged keeps its own {@code ts}, like any
+     *       set of an unchanged value. In particular, keeping {@code C} is
+     *       not a modification.</li>
+     * </ul>
+     *
+     * <p>When the result is identical to this tree the merge is a no-op and
+     * nothing is marked dirty. The working node is reset to the root.</p>
+     *
+     * @param other the tree to import; it is not modified
+     * @return what the merge did
+     */
+    public MergeStats merge(NodeTree other) throws NodeTreeException {
+        Objects.requireNonNull(other, "other");
+        long now = System.currentTimeMillis();
+        Counter counter = new Counter();
+        MergeOutcome merged = mergeObject(root, other.root, now, counter);
+        cwd.clear();
+        if (merged.changed()) {
+            // mutate in place so references to root handed out earlier stay valid
+            root.removeAll();
+            root.setAll(merged.node());
+            dirty = true;
+        } else {
+            // still never leave the root in the future
+            root.put(TS, clamp(root.path(TS).asLong(), now, counter));
+        }
+        return counter.toStats();
+    }
+
+    /**
+     * Result of merging one node: its merged content and the {@code ts} it must
+     * end up carrying.
+     *
+     * @param node    the merged object
+     * @param changed whether anything in this subtree differs from the current
+     *                content
+     */
+    private record MergeOutcome(ObjectNode node, boolean changed) {
+    }
+
+    /**
+     * Merges the imported node {@code otherNode} into the current node
+     * {@code here}, both representing the same path.
+     */
+    private MergeOutcome mergeObject(ObjectNode here, ObjectNode otherNode, long now, Counter counter) {
+        long tsC = here.path(TS).asLong();
+        long tsS = otherNode.path(TS).asLong();
+        ObjectNode out = here.deepCopy();
+        boolean changed = false;
+
+        // keys the imported side has (children and values)
+        for (Map.Entry<String, JsonNode> e : otherNode.properties()) {
+            String name = e.getKey();
+            if (name.equals(TS)) {
+                continue;
+            }
+            JsonNode theirs = e.getValue();
+            JsonNode mine = here.get(name);
+            if (theirs.isObject()) {
+                if (mine != null && mine.isObject()) {
+                    // same path on both sides: never replace the subtree, recurse
+                    MergeOutcome sub = mergeObject((ObjectNode) mine, (ObjectNode) theirs, now, counter);
+                    if (!sub.node().equals(mine)) {
+                        out.set(name, sub.node());
+                    }
+                    changed |= sub.changed();
+                } else if (mine != null) {
+                    // a node here, a value there: the newer owner wins
+                    if (tsS > tsC) {
+                        stampAdded((ObjectNode) theirs, tsS, now, counter);
+                        out.set(name, theirs.deepCopy());
+                        changed = true;
+                    } else {
+                        counter.kept++;
+                    }
+                } else {
+                    stampAdded((ObjectNode) theirs, tsS, now, counter);
+                    out.set(name, theirs.deepCopy());
+                    changed = true;
+                }
+            } else if (mine == null) {
+                out.set(name, theirs.deepCopy());
+                counter.valuesAdded++;
+                changed = true;
+            } else if (mine.isObject()) {
+                // a value here, a node there: the newer owner wins
+                if (tsS > tsC) {
+                    out.set(name, theirs.deepCopy());
+                    counter.valuesAdded++;
+                    changed = true;
+                } else {
+                    counter.kept++;
+                }
+            } else if (mine.equals(theirs)) {
+                counter.valuesKept++;
+            } else if (tsS > tsC) {
+                out.set(name, theirs.deepCopy());
+                counter.valuesUpdated++;
+                changed = true;
+            } else {
+                counter.valuesKept++;
+            }
+        }
+
+        // keys only the current side has are never removed: merging only adds.
+        // Two independent notebooks may legitimately hold different branches
+        // (google/projectA on one side, google/projectB on the other); absence
+        // in the imported tree is not evidence that anything was deleted.
+        for (Iterator<String> it = here.fieldNames(); it.hasNext(); ) {
+            String name = it.next();
+            if (!name.equals(TS) && !otherNode.has(name)) {
+                counter.kept++;
+            }
+        }
+
+        if (!changed) {
+            counter.kept++;
+            out.put(TS, clamp(tsC, now, counter));
+            return new MergeOutcome(out, false);
+        }
+        counter.updated++;
+        out.put(TS, normativeTs(tsS, tsC, now, counter));
+        return new MergeOutcome(out, true);
+    }
+
+    /**
+     * Records a whole node the current side lacks: it counts as added together
+     * with its descendants, and its timestamps are clamped to {@code now}.
+     */
+    private static void stampAdded(ObjectNode node, long tsS, long now, Counter counter) {
+        node.put(TS, clamp(tsS, now, counter));
+        counter.added++;
+        for (Map.Entry<String, JsonNode> e : node.properties()) {
+            String key = e.getKey();
+            if (key.equals(TS)) {
+                continue;
+            }
+            if (e.getValue().isObject()) {
+                stampAdded((ObjectNode) e.getValue(), e.getValue().path(TS).asLong(), now, counter);
+            } else {
+                counter.valuesAdded++;
+            }
+        }
+    }
+
+    /** Mutable counts while a merge runs; {@code normativeTs} counts the clamped timestamps. */
+    private static final class Counter {
+        int added;
+        int updated;
+        int kept;
+        int valuesAdded;
+        int valuesUpdated;
+        int valuesKept;
+        int normativeTs;
+
+        MergeStats toStats() {
+            return new MergeStats(added, updated, kept,
+                    valuesAdded, valuesUpdated, valuesKept, normativeTs);
+        }
+    }
+
+    /** The stored {@code ts} of {@code node}, clamped to {@code now}. */
+    private static long clamp(long ts, long now, Counter counter) {
+        if (ts > now) {
+            counter.normativeTs++;
+            return now;
+        }
+        return ts;
+    }
+
+    /** {@code min(max(s, c), now)}: the winning timestamp, never in the future. */
+    private static long normativeTs(long s, long c, long now, Counter counter) {
+        return clamp(Math.max(s, c), now, counter);
     }
 
     private static List<String> childrenOf(ObjectNode node) {

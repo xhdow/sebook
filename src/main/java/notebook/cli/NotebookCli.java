@@ -21,6 +21,7 @@ import notebook.crypto.VaultException;
 import notebook.tree.AmbiguousPathException;
 import notebook.tree.Match;
 import notebook.tree.MatchKind;
+import notebook.tree.MergeStats;
 import notebook.tree.NodeTree;
 import notebook.tree.NodeTreeException;
 
@@ -209,6 +210,7 @@ public final class NotebookCli {
             case ".pass" -> { doPass(args); return false; }
             case ".save" -> { doSave(); return false; }
             case ".export" -> { requireArgs(cmd, args, 1); doExport(Path.of(args[0])); return false; }
+            case ".import" -> { requireArgs(cmd, args, 1); doImport(args[0]); return false; }
             case ".discard", ".reload" -> { doDiscard(); return false; }
             case ".exit", ".quit", ".q" -> { return confirmExit(); }
             default -> { out.println("unknown command: " + cmd + " (try .help)"); return false; }
@@ -432,6 +434,40 @@ public final class NotebookCli {
         }
     }
 
+    /**
+     * Merges a plaintext notebook JSON file into the working tree.
+     *
+     * <p>The import is atomic: it is merged into a copy first, so an invalid or
+     * unreadable file leaves the current notebook untouched even halfway
+     * through.</p>
+     */
+    private void doImport(String file) throws IOException, NodeTreeException {
+        Path source = Path.of(file);
+        if (!Files.isRegularFile(source)) {
+            out.println("no such file: " + source.toAbsolutePath());
+            return;
+        }
+        byte[] plain = Files.readAllBytes(source);
+        NodeTree imported;
+        try {
+            imported = NodeTree.fromJson(new String(plain, StandardCharsets.UTF_8));
+        } catch (NodeTreeException e) {
+            throw new NodeTreeException("cannot import " + source.toAbsolutePath() + ": " + e.getMessage());
+        } finally {
+            Vault.wipe(plain);
+        }
+        NodeTree candidate = tree.copy();
+        MergeStats stats = candidate.merge(imported);
+        if (!stats.changed()) {
+            out.println("import: nothing changed, the notebook already contains everything.");
+            return;
+        }
+        tree = candidate;
+        out.println("imported " + source.toAbsolutePath());
+        out.println("  " + stats.describe());
+        out.println("[dirty] use .save to write the merged notebook.");
+    }
+
     private void doDiscard() throws IOException, NodeTreeException, VaultException {
         if (!tree.isDirty()) {
             out.println("no unsaved changes.");
@@ -527,6 +563,9 @@ public final class NotebookCli {
                   .save               encrypt and write the vault file (asks for the
                                       password twice and verifies it before writing)
                   .export <file>      export DECRYPTED json (asks for confirmation)
+                  .import <file>      merge a plaintext json notebook into this one
+                                      (newer nodes win; nothing changes if the
+                                      file cannot be read)
                   .discard            drop unsaved changes and reload from disk
                 other
                   .pass <length>      generate a random password (letters, digits, symbols)

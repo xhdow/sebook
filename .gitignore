@@ -2,6 +2,9 @@
 out/
 dist/
 
+# test data
+data/
+
 # vault data: never commit encrypted notebooks or plaintext exports
 *.vault
 .vault-*.tmp

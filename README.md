@@ -14,6 +14,8 @@ src/main/java/notebook/
             FileToolCli  encrypt/decrypt any file, inspect header
 src/test/java/notebook/
   SelfCheck.java       dependency-free test suite
+docs/
+  merge-algorithm.md   merge rules as pseudo code, in natural language
 ```
 
 `Vault` and `NodeTree` do not depend on each other or on the CLI, so both can
@@ -59,6 +61,7 @@ written. Afterwards you unlock with the same password.
 | `.rm <name> [--force]` | delete a child node and everything below it |
 | `.save` | encrypt and write the vault file (password entered twice and verified) |
 | `.export <file>` | export **decrypted** JSON (asks for confirmation) |
+| `.import <file>` | merge a plaintext notebook JSON into the current one (see below) |
 | `.discard` | drop unsaved changes, reload from disk |
 | `.pass <length>` | generate a random password (lowercase, uppercase, digits, symbols) |
 | `.help` / `.exit` | |
@@ -68,6 +71,28 @@ Timestamps are shown in the machine's local time zone with its UTC offset.
 written ciphertext cannot be decrypted again with it, nothing is written.
 
 Values with spaces must be quoted: `.set title "my long title"`.
+
+### Importing another notebook
+
+`.import file.json` merges a plaintext notebook (for example one produced by
+`.export`) into the open notebook, starting at the root. Nodes are matched by
+their path from the root; when both trees have a node, their contents are
+unioned instead of the newer one replacing the whole subtree:
+
+- path only in the imported file: added as-is (its `ts` values are kept);
+- path only in the current notebook: **always kept**. Merging only ever adds,
+  so two notebooks used for different work both keep their branches (deleting
+  is still done explicitly with `.rm` / `.del`);
+- a value present on both sides with different content: the newer one wins
+  (a tie keeps the current value);
+- kept decisions change nothing, so kept nodes keep their own `ts`.
+
+A node whose content changed ends up with
+`min(max(imported ts, current ts), now)`, so no timestamp can be in the future.
+The merge is all-or-nothing: the file is parsed and merged into a copy first,
+so a malformed file leaves the notebook untouched. Nothing is written until
+`.save`. The full algorithm, as pseudo code with explanations, is in
+[`docs/merge-algorithm.md`](docs/merge-algorithm.md).
 
 Fuzzy names use edit distance. `wrk` resolves to `work` when it is the only
 close match; when several children match, the candidates are listed and you
@@ -108,7 +133,6 @@ any other value is a **leaf value**. There is no separate `children` field.
   "work": {
     "ts": 1794312289193,
     "title": "project",
-    "tags": ["a", "b"],
     "deep": {
       "ts": 1794312289193,
       "note": "hello"
