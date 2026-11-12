@@ -1,4 +1,4 @@
-package notebook.cli;
+package sebook.cli;
 
 import java.io.BufferedReader;
 import java.io.Console;
@@ -16,25 +16,26 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
-import notebook.crypto.Vault;
-import notebook.crypto.VaultException;
-import notebook.tree.AmbiguousPathException;
-import notebook.tree.Match;
-import notebook.tree.MatchKind;
-import notebook.tree.MergeStats;
-import notebook.tree.NodeTree;
-import notebook.tree.NodeTreeException;
+import sebook.crypto.Vault;
+import sebook.crypto.VaultException;
+import sebook.tree.AmbiguousPathException;
+import sebook.tree.Match;
+import sebook.tree.MatchKind;
+import sebook.tree.MergeStats;
+import sebook.tree.NodeTree;
+import sebook.tree.NodeTreeException;
 
 /**
- * Interactive command-line front end for an encrypted personal notebook.
+ * Interactive command-line front end for a sebook: a personal notebook of
+ * password-protected JSON notes.
  *
  * <p>Data lives in memory as a {@link NodeTree}; it is encrypted with
  * {@link Vault} and written to a single binary file only on {@code .save}.
  * Plaintext reaches the disk only through an explicit {@code .export}.</p>
  */
-public final class NotebookCli {
+public final class SebookCli {
 
-    private static final String DEFAULT_VAULT = "notebook.vault";
+    private static final String DEFAULT_VAULT = "sebook.vault";
     private static final int MAX_PASSWORD_ATTEMPTS = 3;
 
     private final Console console = System.console();
@@ -49,7 +50,7 @@ public final class NotebookCli {
     public static void main(String[] args) {
         Path path = Path.of(args.length > 0 ? args[0] : DEFAULT_VAULT);
         try {
-            new NotebookCli().run(path);
+            new SebookCli().run(path);
         } catch (Exception e) {
             System.err.println("fatal: " + e.getMessage());
             System.exit(1);
@@ -59,7 +60,7 @@ public final class NotebookCli {
     private void run(Path path) throws IOException, VaultException, NodeTreeException {
         this.vaultPath = path.toAbsolutePath();
 
-        out.println("== encrypted notebook ==");
+        out.println("== sebook :: encrypted notebook ==");
         out.println("vault: " + vaultPath);
 
         if (Files.exists(vaultPath)) {

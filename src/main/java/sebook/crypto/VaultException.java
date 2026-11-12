@@ -1,4 +1,4 @@
-package notebook.crypto;
+package sebook.crypto;
 
 /**
  * Thrown by {@link Vault} for any cryptographic or file-format problem.

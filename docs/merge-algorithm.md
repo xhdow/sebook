@@ -1,7 +1,7 @@
 # 合并算法（伪代码）
 
 本文档用伪代码描述 `NodeTree.merge(NodeTree other)` 的实现，参考代码在
-`src/main/java/notebook/tree/NodeTree.java` 的 `mergeNode` / `mergeValue` /
+`src/main/java/sebook/tree/NodeTree.java` 的 `mergeNode` / `mergeValue` /
 `mergeDirectory` / `stampAdded` / `clamp` / `normativeTs`。
 
 术语与符号：

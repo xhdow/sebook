@@ -1,18 +1,18 @@
-package notebook;
+package sebook;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 
-import notebook.crypto.Vault;
-import notebook.crypto.VaultException;
-import notebook.tree.NodeTree;
-import notebook.tree.NodeTreeException;
+import sebook.crypto.Vault;
+import sebook.crypto.VaultException;
+import sebook.tree.NodeTree;
+import sebook.tree.NodeTreeException;
 
 /**
  * Minimal self-check without a test framework. Run with:
- * {@code java -cp "out;lib/*" notebook.SelfCheck}
+ * {@code java -cp "out;lib/*" sebook.SelfCheck}
  */
 public final class SelfCheck {
 
@@ -266,7 +266,7 @@ public final class SelfCheck {
         check("exact wins", t.match("work").matched().equals("work"));
         checkThrows("ambiguous", NodeTreeException.class, () -> t.cd("wor"));
         checkThrows("no match", NodeTreeException.class, () -> t.cd("zzzz"));
-        check("fuzzy none", t.match("zzzz").kind() == notebook.tree.MatchKind.NONE);
+        check("fuzzy none", t.match("zzzz").kind() == sebook.tree.MatchKind.NONE);
         t.cd("HOME".toLowerCase());
         check("case-insensitive exact", t.pwd().equals("/home"));
     }
@@ -346,7 +346,7 @@ public final class SelfCheck {
         NodeTree s = parse("{\"ts\":2000,\"work\":{\"ts\":2000,\"title\":" + v(1000, "\"old\"") + ","
                 + "\"deep\":{\"ts\":1500,\"note\":" + v(1500, "\"hello\"") + "}},"
                 + "\"home\":{\"ts\":2000,\"x\":" + v(2000, "1") + "}}");
-        notebook.tree.MergeStats st = c.merge(s);
+        sebook.tree.MergeStats st = c.merge(s);
         check("merge adds missing directory", c.nodeAt("/home") != null);
         check("merge adds missing value", "hello".equals(val(c, "/work/deep/note")));
         check("merge adds nested directory", c.nodeAt("/work/deep") != null);
@@ -449,7 +449,7 @@ public final class SelfCheck {
         NodeTree c = parse(body);
         NodeTree s = parse(body);
         String beforeJson = c.toJson();
-        notebook.tree.MergeStats st = c.merge(s);
+        sebook.tree.MergeStats st = c.merge(s);
         check("identical merge keeps json", c.toJson().equals(beforeJson));
         check("identical merge not dirty", !c.isDirty());
         check("identical merge counts as kept", st.updated() == 0 && st.added() == 0, st.describe());
@@ -481,7 +481,7 @@ public final class SelfCheck {
 
     private static void passwordGenerator() {
         for (int len : new int[] {4, 8, 16, 20, 64}) {
-            String pw = notebook.cli.NotebookCli.generatePassword(len);
+            String pw = sebook.cli.SebookCli.generatePassword(len);
             boolean size = pw.length() == len;
             boolean categories = pw.chars().anyMatch(Character::isLowerCase)
                     && pw.chars().anyMatch(Character::isUpperCase)
@@ -491,8 +491,8 @@ public final class SelfCheck {
         }
         boolean distinct = true;
         for (int i = 0; i < 200; i++) {
-            if (notebook.cli.NotebookCli.generatePassword(24).equals(
-                    notebook.cli.NotebookCli.generatePassword(24))) {
+            if (sebook.cli.SebookCli.generatePassword(24).equals(
+                    sebook.cli.SebookCli.generatePassword(24))) {
                 distinct = false;
                 break;
             }

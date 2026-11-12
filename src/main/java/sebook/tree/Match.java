@@ -1,4 +1,4 @@
-package notebook.tree;
+package sebook.tree;
 
 import java.util.List;
 

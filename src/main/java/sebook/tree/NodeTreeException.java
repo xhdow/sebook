@@ -1,4 +1,4 @@
-package notebook.tree;
+package sebook.tree;
 
 /**
  * Thrown when a tree operation cannot be completed: bad path, reserved key,

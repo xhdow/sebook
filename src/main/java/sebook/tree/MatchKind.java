@@ -1,4 +1,4 @@
-package notebook.tree;
+package sebook.tree;
 
 /**
  * How a fuzzy name lookup ended up.

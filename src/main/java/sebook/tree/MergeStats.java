@@ -1,4 +1,4 @@
-package notebook.tree;
+package sebook.tree;
 
 /**
  * What a {@link NodeTree#merge(NodeTree)} call did, for reporting and tests.

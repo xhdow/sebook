@@ -1,4 +1,4 @@
-package notebook.cli;
+package sebook.cli;
 
 import java.io.BufferedReader;
 import java.io.Console;
@@ -11,17 +11,17 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.HexFormat;
 
-import notebook.crypto.Vault;
-import notebook.crypto.VaultException;
+import sebook.crypto.Vault;
+import sebook.crypto.VaultException;
 
 /**
  * Stand-alone command-line tool for encrypting and decrypting arbitrary files,
  * and for showing a vault file's cleartext metadata.
  *
  * <pre>
- *   java -cp ... notebook.cli.FileToolCli encrypt &lt;in&gt; [&lt;out&gt;] [--force]
- *   java -cp ... notebook.cli.FileToolCli decrypt &lt;in&gt; [&lt;out&gt;] [--force]
- *   java -cp ... notebook.cli.FileToolCli info    &lt;file&gt;
+ *   java -cp ... sebook.cli.FileToolCli encrypt &lt;in&gt; [&lt;out&gt;] [--force]
+ *   java -cp ... sebook.cli.FileToolCli decrypt &lt;in&gt; [&lt;out&gt;] [--force]
+ *   java -cp ... sebook.cli.FileToolCli info    &lt;file&gt;
  * </pre>
  *
  * <p>{@code info} never asks for a password and never decrypts anything: it

@@ -1,4 +1,4 @@
-package notebook.crypto;
+package sebook.crypto;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
