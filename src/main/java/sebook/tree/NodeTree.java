@@ -523,6 +523,19 @@ public final class NodeTree {
         dirty = false;
     }
 
+    /**
+     * Marks the tree dirty and stamps the current node and every ancestor with
+     * the current time.
+     *
+     * <p>For callers that changed the node objects directly (for example a
+     * rename that moves a child inside its parent): the change must be
+     * reflected in every ancestor's timestamp, exactly as {@link #set} would
+     * do. The tree itself is not modified otherwise.</p>
+     */
+    public void touchParents() {
+        touch();
+    }
+
     private void touch() {
         touch(System.currentTimeMillis());
     }
