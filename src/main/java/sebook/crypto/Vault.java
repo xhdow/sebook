@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
@@ -300,9 +301,11 @@ public final class Vault {
      * The temp file only ever contains ciphertext.
      */
     public static void writeAtomically(Path target, byte[] data) throws IOException {
-        Path dir = target.toAbsolutePath().getParent();
+        Path absolute = target.toAbsolutePath();
+        Path dir = absolute.getParent();
         if (dir == null) {
-            dir = Path.of(".").toAbsolutePath();
+            // Path.of() is API 34+; Paths.get() has been there since API 1
+            dir = Paths.get(".").toAbsolutePath();
         }
         Files.createDirectories(dir);
         Path tmp = Files.createTempFile(dir, ".vault-", ".tmp");

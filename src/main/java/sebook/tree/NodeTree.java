@@ -889,11 +889,13 @@ public final class NodeTree {
             return new SegmentLookup(MatchKind.NONE, null, List.of());
         }
         int threshold = Math.max(1, needle.length() / 3);
-        List<String> hits = scored.stream()
+        // Stream.toList() is API 34+; collect explicitly so Android 8..13 work too
+        List<String> hits = new ArrayList<>();
+        scored.stream()
                 .filter(s -> s.distance <= threshold)
                 .sorted(Comparator.comparingInt(Scored::distance).thenComparing(Scored::name))
                 .map(Scored::name)
-                .toList();
+                .forEach(hits::add);
         if (hits.isEmpty()) {
             return new SegmentLookup(MatchKind.NONE, null, List.of());
         }
